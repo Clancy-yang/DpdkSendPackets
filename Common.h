@@ -42,19 +42,16 @@ struct AppWorkerConfig
 {
     //核心id
 	uint32_t CoreId;
-	//接收数据包的DPDK设备列表
-	InputDataConfig InDataCfg;
 	//发送数据包的DPDK设备
 	pcpp::DpdkDevice* SendPacketsTo;
-	//是否将匹配到的包写入文件
-	bool WriteMatchedPacketsToFile;
-	//写文件路径
-	string PathToWritePackets;
+	//读文件目录
+	string PcapFileDirPath;
+	//读文件列表
+    string PcapFileListPath;
 
 	AppWorkerConfig():
 	CoreId(MAX_NUM_OF_CORES+1),
-	SendPacketsTo(nullptr),
-	WriteMatchedPacketsToFile(false)
+	SendPacketsTo(nullptr)
 	{}
 };
 
@@ -127,16 +124,6 @@ public:
 		else
 			values << (int)WorkerId << delimiter;
 		values << PacketCount << delimiter;
-		values << EthCount << delimiter;
-		values << ArpCount << delimiter;
-		values << Ip4Count << delimiter;
-		values << Ip6Count << delimiter;
-		values << TcpCount << delimiter;
-		values << UdpCount << delimiter;
-		values << HttpCount << delimiter;
-		values << MatchedTcpFlows << delimiter;
-		values << MatchedUdpFlows << delimiter;
-		values << MatchedPackets;
 
 		return values.str();
 	}
@@ -146,34 +133,14 @@ public:
 		columnNames.clear();
 		columnWidths.clear();
 
-	    static const int narrowColumnWidth = 11;
-	    static const int wideColumnWidth = 18;
+	    static const int narrowColumnWidth = 17;
 
 		columnNames.emplace_back("Core ID");
-		columnNames.emplace_back("Packet Cnt");
-		columnNames.emplace_back("Eth Cnt");
-		columnNames.emplace_back("ARP Cnt");
-		columnNames.emplace_back("IPv4 Cnt");
-		columnNames.emplace_back("IPv6 Cnt");
-		columnNames.emplace_back("TCP Cnt");
-		columnNames.emplace_back("UDP Cnt");
-		columnNames.emplace_back("HTTP Cnt");
-		columnNames.emplace_back("Matched TCP Flows");
-		columnNames.emplace_back("Matched UDP Flows");
-		columnNames.emplace_back("Matched Packets");
+		columnNames.emplace_back("Send Packets");
+
 
 		columnWidths.push_back(7);
 		columnWidths.push_back(narrowColumnWidth);
-		columnWidths.push_back(narrowColumnWidth);
-		columnWidths.push_back(narrowColumnWidth);
-		columnWidths.push_back(narrowColumnWidth);
-		columnWidths.push_back(narrowColumnWidth);
-		columnWidths.push_back(narrowColumnWidth);
-		columnWidths.push_back(narrowColumnWidth);
-		columnWidths.push_back(narrowColumnWidth);
-		columnWidths.push_back(wideColumnWidth);
-		columnWidths.push_back(wideColumnWidth);
-		columnWidths.push_back(wideColumnWidth);
 
 	}
 };

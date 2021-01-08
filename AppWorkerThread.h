@@ -8,6 +8,119 @@
 #include "DpdkDeviceList.h"
 #include "PcapFileDevice.h"
 
+#include "RawPacket.h"
+
+
+#include "malloc.h"
+#include "dirent.h"
+#include "sys/stat.h"
+#include <unistd.h>
+
+#include <unordered_map>
+
+// 已经被读取过的pcap数据包
+unordered_map<string, int> read_pcap_map_;
+
+template<typename T>
+static inline void FreeContainer(T& p_container){
+    T empty;
+    using std::swap;
+    swap(p_container, empty);
+}
+
+int FindSecondDirFile(const char *dir_name, vector<string> &v) {
+    DIR *dir;
+    struct stat FileInfo{};
+    struct dirent *dp;
+    dir = opendir(dir_name);
+    if (dir == nullptr)
+        return 0;
+    while((dp = readdir(dir)) != nullptr){
+        if (dp->d_type == DT_UNKNOWN)
+            continue;
+        if (dp->d_type == DT_DIR){
+            if (string(dp->d_name) != "." && string(dp->d_name) != ".."){
+                string second_dir = string(dir_name) + "/" + string(dp->d_name);
+                FindSecondDirFile(second_dir.c_str(), v);
+            }
+            continue;
+        }
+        string pcap_name = std::string(dir_name) + "/" + string(dp->d_name);
+        if (read_pcap_map_.find(pcap_name) == read_pcap_map_.end()){
+            // 抛弃空包
+            stat(pcap_name.c_str(), &FileInfo);
+            if (FileInfo.st_size > 24)
+                v.emplace_back(pcap_name);
+        }
+    }
+    return 0;
+}
+
+static bool SortPcapName(const string &the_first, const string &the_second) {
+    pcpp::PcapFileReaderDevice first_reader(the_first.c_str());
+    if (!first_reader.open())
+        return false;
+    pcpp::PcapFileReaderDevice second_reader(the_second.c_str());
+    if (!second_reader.open())
+        return false;
+    bool result = true;
+    auto firstPcapRawPacket = new pcpp::RawPacket();
+    auto secondPcapRawPacket = new pcpp::RawPacket();
+    if (!first_reader.getNextPacket(*firstPcapRawPacket) || !second_reader.getNextPacket(*secondPcapRawPacket))
+        result = false;
+    if (result && firstPcapRawPacket->getPacketTimeStamp().tv_sec > secondPcapRawPacket->getPacketTimeStamp().tv_sec) {
+        result = false;
+    } else if (result && firstPcapRawPacket->getPacketTimeStamp().tv_sec ==
+                         secondPcapRawPacket->getPacketTimeStamp().tv_sec) {
+        if (firstPcapRawPacket->getPacketTimeStamp().tv_nsec > secondPcapRawPacket->getPacketTimeStamp().tv_nsec) {
+            result = false;
+        }
+    }
+    first_reader.close();
+    second_reader.close();
+    delete firstPcapRawPacket;
+    firstPcapRawPacket = nullptr;
+    delete secondPcapRawPacket;
+    secondPcapRawPacket = nullptr;
+    return result;
+}
+
+int FindDirFile(const char *dir_name, vector<string> &v) {
+    DIR *dir;
+    struct stat FileInfo{};
+    FreeContainer(v);
+    struct dirent *dp;
+    dir = opendir(dir_name);
+    if (dir == nullptr){
+        cout << "被监控文件夹:" << dir_name << " 不存在，请去config/config.ini修改" << endl;
+    }
+    while((dp = readdir(dir)) != nullptr){
+        if (dp->d_type == DT_UNKNOWN)
+            continue;
+        if (dp->d_type == DT_DIR){
+            if (string(dp->d_name) != "." && string(dp->d_name) != ".."){
+                string second_dir = string(dir_name) + "/" + string(dp->d_name);
+                FindSecondDirFile(second_dir.c_str(), v);
+            }
+            continue;
+        }
+        string pcap_name = string(dir_name) + "/" + string(dp->d_name);
+        if (read_pcap_map_.find(pcap_name) == read_pcap_map_.end()){
+            pcpp::PcapFileReaderDevice first_reader(pcap_name.c_str());
+            if (first_reader.open()) {
+                // 抛弃空包
+                stat(pcap_name.c_str(), &FileInfo);
+                if (FileInfo.st_size > 24)
+                    v.emplace_back(pcap_name);
+            }
+
+        }
+    }
+    closedir(dir);
+    sort(v.begin(), v.end(), SortPcapName);
+    return 0;
+}
+
 /**
  * 完成所有工作的工作线程类：从相关的DPDK端口接收数据包，将其与数据包匹配引擎进行匹配，
  * 然后将其发送到TX端口和/或将它们保存到文件。此外，它还收集数据包统计信息。
@@ -18,15 +131,12 @@ class AppWorkerThread : public pcpp::DpdkWorkerThread
 private:
     bool m_Stop;
     PacketStats m_Stats;
-    map<uint32_t, bool> m_FlowTable;
 
     uint32_t m_CoreId;
 	AppWorkerConfig& m_WorkerConfig;
-	PacketMatchingEngine& m_PacketMatchingEngine;
 public:
-	AppWorkerThread(AppWorkerConfig& workerConfig, PacketMatchingEngine& matchingEngine) :
-	    m_Stop(true), m_CoreId(MAX_NUM_OF_CORES+1), m_WorkerConfig(workerConfig),
-		m_PacketMatchingEngine(matchingEngine){}
+	explicit AppWorkerThread(AppWorkerConfig& workerConfig) :
+	    m_Stop(true), m_CoreId(MAX_NUM_OF_CORES+1), m_WorkerConfig(workerConfig){}
 
 	~AppWorkerThread() override = default;// do nothing
 
@@ -38,111 +148,60 @@ public:
 	//实现抽象方法
 	bool run(uint32_t coreId) override
 	{
+	    if(m_WorkerConfig.SendPacketsTo == nullptr) return true;
+
 		m_CoreId = coreId;
 		m_Stop = false;
 		m_Stats.WorkerId = coreId;
 		pcpp::DpdkDevice* sendPacketsTo = m_WorkerConfig.SendPacketsTo;
-		pcpp::PcapFileWriterDevice* pcapWriter = nullptr;
-
-		//如果需要，创建pcap文件写入器，所有匹配的数据包都将写入其中
-		if (m_WorkerConfig.WriteMatchedPacketsToFile)
-		{
-			pcapWriter = new pcpp::PcapFileWriterDevice(m_WorkerConfig.PathToWritePackets.c_str());
-			if (!pcapWriter->open()) EXIT_WITH_ERROR("Couldn't open pcap writer device");
-		}
-
-		//如果未将DPDK设备分配给该工作线程/核心，请不要进入主循环并退出
-		if (m_WorkerConfig.InDataCfg.empty()) return true;
-
-		#define MAX_RECEIVE_BURST 64
-		pcpp::MBufRawPacket* packetArr[MAX_RECEIVE_BURST] = {};
+        string path = m_WorkerConfig.PcapFileDirPath;
+        vector<string> v;
+        struct timeval start{}, end{};
+        struct stat FileInfo{};
 
 		//主循环，运行直到被告知停止
 		while (!m_Stop)
 		{
-			//查看为此工作线程/核心配置的所有DPDK设备
-			for (auto & iter : m_WorkerConfig.InDataCfg)
-			{
-				//对于每个DPDK设备，请遍历为此工作线程/核心配置的所有RX队列
-				for (auto iter2 = iter.second.begin(); iter2 != iter.second.end(); iter2++)
-				{
-					pcpp::DpdkDevice* dev = iter.first;
+            FindDirFile(path.c_str(), v);
 
-					//从指定的DPDK设备和RX队列上的网络接收数据包
-					uint16_t packetsReceived = dev->receivePackets(packetArr, MAX_RECEIVE_BURST, *iter2);
+            if (v.empty()){
+                malloc_trim(0); // 回收内存
+                cout << "当前所有文件读取完毕.. 正在监控文件夹: " << path  << endl;
+                sleep(2);
+            }
 
-					for (int i = 0; i < packetsReceived; i++)
-					{
-						//解析数据包
-						pcpp::Packet parsedPacket(packetArr[i]);
-
-						//收集数据包统计信息
-						m_Stats.collectStats(parsedPacket);
-
-						//数据包是否匹配上
-						bool packetMatched;
-
-						//用五元组对数据包进行散列，然后在流表中查看该数据包是属于现有流还是新流
-						uint32_t hash = pcpp::hash5Tuple(&parsedPacket);
-						auto iter3 = m_FlowTable.find(hash);
-
-						//如果数据包属于一个已经存在的流
-						if (iter3 != m_FlowTable.end() && iter3->second)
-						{
-							packetMatched = true;
-						}
-						else //数据包属于新流
-						{
-						    //数据包根据条件进行匹配
-							packetMatched = m_PacketMatchingEngine.isMatched(parsedPacket);
-							if (packetMatched)
-							{
-								//将新流程放入流表
-								m_FlowTable[hash] = true;
-
-								//收集统计数据
-								if (parsedPacket.isPacketOfType(pcpp::TCP))
-								{
-									m_Stats.MatchedTcpFlows++;
-								}
-								else if (parsedPacket.isPacketOfType(pcpp::UDP))
-								{
-									m_Stats.MatchedUdpFlows++;
-								}
-
-							}
-						}
-
-						if (packetMatched)
-						{
-							// 如果需要，将数据包发送到TX端口
-							if (sendPacketsTo != nullptr)
-							{
-								sendPacketsTo->sendPacket(*packetArr[i], 0);
-							}
-
-							// 如果需要，将数据包保存到文件
-							if (pcapWriter != nullptr)
-							{
-								pcapWriter->writePacket(*packetArr[i]);
-							}
-
-							m_Stats.MatchedPackets++;
-						}
-					}
-				}
-			}
+            uint32_t file_size = v.size(); // 剩余待读文件数量
+            uint32_t current_num = 0;
+            pcpp::RawPacket raw_packet;
+            for (const string &s :v){
+                pcpp::PcapFileReaderDevice reader(s.c_str());
+                if(!reader.open()){
+                    read_pcap_map_.insert(make_pair(s, 1));
+                    cout << "文件" << s << "打开失败"<<endl;
+                    continue;
+                }
+                gettimeofday(&start, nullptr);
+                stat(s.c_str(), &FileInfo);
+                cout << "开始读取File: " << s << "(" << ++current_num << "/" << file_size << ")" << endl;
+                while (true){
+                    if (!m_Stop && !reader.getNextPacket(raw_packet)){
+                        gettimeofday(&end, nullptr);
+                        float useTime = (end.tv_sec - start.tv_sec) + (double)(end.tv_usec - start.tv_usec)/1000000.0;
+                        cout << "耗费时间: " << useTime << "(s)" << " 文件大小: " << FileInfo.st_size /1024/1024 << "(MB)"
+                                  << " 速度: " << FileInfo.st_size /1024/1024 / useTime << "(MB/s)" << endl;
+                        read_pcap_map_.insert(make_pair(s, 1));
+                        break; // 收尾完成，退出
+                    }
+                    sendPacketsTo->sendPacket(raw_packet,0);
+                    m_Stats.PacketCount++;
+                }
+                if(m_Stop){
+                    reader.close();
+                    break;
+                }
+            }
 		}
 
-		// free packet array (frees all mbufs as well)
-		for (auto & i : packetArr)
-		{
-		    delete i;
-		    i = nullptr;
-		}
-
-		//关闭并删除pcap文件编写器
-		delete pcapWriter;
 		return true;
 	}
 
@@ -156,5 +215,4 @@ public:
 	{
 		return m_CoreId;
 	}
-
 };
