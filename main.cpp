@@ -141,6 +141,7 @@ int main(int argc, char* argv[]) {
     AppWorkerConfig workerConfigArr[coresToUse.size()];
     workerConfigArr[0].CoreId = coresToUse[0].Id;
     workerConfigArr[0].SendPacketsTo = sendPacketsTo;
+    workerConfigArr[0].SendPacketsPort = sendPacketsToPort;
     workerConfigArr[0].PcapFileDirPath = pcapDirPath;
     workerConfigArr[0].PcapFileListPath = pcapListPath;
 
@@ -208,7 +209,7 @@ void onApplicationInterrupted(void* cookie)
     //停止工作线程
     printf("\n\nApplication stopped\n");
 
-   // DpdkDeviceList::getInstance().stopDpdkWorkerThreads();
+    //DpdkDeviceList::getInstance().stopDpdkWorkerThreads();
 
     //创建表格打印
     std::vector<std::string> columnNames;
@@ -244,8 +245,8 @@ void printUsage()
            //"    -b                           : pcap包的list文件\n"
            "------\n"
            "\n流程:\n\n"
-           "./DpdkSendPackets --h  查看使用说明\n"
-           "./DpdkSendPackets --l  查看DPDK支持端口列表\n"
+           "./DpdkSendPackets -h  查看使用说明\n"
+           "./DpdkSendPackets -l  查看DPDK支持端口列表\n"
            "./DpdkSendPackets -s 0 -a /data/pcap            设置DPDK发包端口0读取目录/data/pcap包\n"
            //"./DpdkSendPackets -s 0 -b /data/send_pcap.list  设置DPDK发包端口0读取目录/data/send_pcap.list文件中包地址\n"
            , AppName::get().c_str());

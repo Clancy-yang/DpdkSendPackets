@@ -42,8 +42,9 @@ struct AppWorkerConfig
 {
     //核心id
 	uint32_t CoreId;
-	//发送数据包的DPDK设备
+	//发送数据包的DPDK设备和端口
 	pcpp::DpdkDevice* SendPacketsTo;
+    uint16_t SendPacketsPort = 0;
 	//读文件目录
 	string PcapFileDirPath;
 	//读文件列表
@@ -64,54 +65,23 @@ struct PacketStats
 public:
 	uint8_t WorkerId;
 
-	int PacketCount;
-	int EthCount;
-	int ArpCount;
-	int Ip4Count;
-	int Ip6Count;
-	int TcpCount;
-	int UdpCount;
-	int HttpCount;
+    uint64_t PacketCount = 0;
+    uint64_t sendSuccess_ = 0;//包数
+	uint64_t sendError_ = 0;
+	uint64_t send_success_number_ = 0;//数据量
+	uint64_t total_number_ = 0;
 
-	int MatchedTcpFlows;
-	int MatchedUdpFlows;
-	int MatchedPackets;
+	PacketStats() : WorkerId(MAX_NUM_OF_CORES+1), PacketCount(0){}
 
-	PacketStats() : WorkerId(MAX_NUM_OF_CORES+1), PacketCount(0), EthCount(0), ArpCount(0), Ip4Count(0), Ip6Count(0), TcpCount(0), UdpCount(0), HttpCount(0), MatchedTcpFlows(0), MatchedUdpFlows(0), MatchedPackets(0) {}
 
-	void collectStats(pcpp::Packet& packet)
-	{
-		PacketCount++;
-		if (packet.isPacketOfType(pcpp::Ethernet))
-			EthCount++;
-		if (packet.isPacketOfType(pcpp::ARP))
-			ArpCount++;
-		if (packet.isPacketOfType(pcpp::IPv4))
-			Ip4Count++;
-		if (packet.isPacketOfType(pcpp::IPv6))
-			Ip6Count++;
-		if (packet.isPacketOfType(pcpp::TCP))
-			TcpCount++;
-		if (packet.isPacketOfType(pcpp::UDP))
-			UdpCount++;
-		if (packet.isPacketOfType(pcpp::HTTP))
-			HttpCount++;
-	}
 
 	void collectStats(PacketStats& stats)
 	{
 		PacketCount += stats.PacketCount;
-		EthCount += stats.EthCount;
-		ArpCount += stats.ArpCount;
-		Ip4Count += stats.Ip4Count;
-		Ip6Count += stats.Ip6Count;
-		TcpCount += stats.TcpCount;
-		UdpCount += stats.UdpCount;
-		HttpCount += stats.HttpCount;
-
-		MatchedTcpFlows += stats.MatchedTcpFlows;
-		MatchedUdpFlows += stats.MatchedUdpFlows;
-		MatchedPackets += stats.MatchedPackets;
+        sendSuccess_ += stats.sendSuccess_;
+        sendError_ += stats.sendError_;
+        send_success_number_ += stats.send_success_number_;
+        total_number_ += stats.total_number_;
 	}
 
 	//void clear() { WorkerId = MAX_NUM_OF_CORES+1; PacketCount = 0; EthCount = 0; ArpCount = 0; Ip4Count = 0; Ip6Count = 0; TcpCount = 0; UdpCount = 0; HttpCount = 0; MatchedTcpFlows = 0; MatchedUdpFlows = 0; MatchedPackets = 0; }
@@ -119,11 +89,16 @@ public:
 	[[nodiscard]] std::string getStatValuesAsString(const std::string& delimiter) const
 	{
 		std::stringstream values;
-		if (WorkerId == MAX_NUM_OF_CORES+1)
-			values << "Total" << delimiter;
-		else
-			values << (int)WorkerId << delimiter;
+//		if (WorkerId == MAX_NUM_OF_CORES+1)
+//			values << "Total" << delimiter;
+//		else
+//			values << (int)WorkerId << delimiter;
 		values << PacketCount << delimiter;
+        values << sendSuccess_ << delimiter;
+        values << sendError_ << delimiter;
+        values << (double)total_number_ / 1024 / 1024 / 1024 << delimiter;
+        values << (double)send_success_number_ / 1024 / 1024 / 1024 << delimiter;
+        values << ((double)send_success_number_ / (double)total_number_) * 100 << delimiter;
 
 		return values.str();
 	}
@@ -133,14 +108,18 @@ public:
 		columnNames.clear();
 		columnWidths.clear();
 
-	    static const int narrowColumnWidth = 17;
+		columnNames.emplace_back("  总发送数据包数  ");
+        columnNames.emplace_back(" 发送成功数据包数 ");
+        columnNames.emplace_back(" 发送失败数据包数 ");
+        columnNames.emplace_back("全部数据量(GB)");
+        columnNames.emplace_back("成功数据量(GB)");
+        columnNames.emplace_back(" 成功率(%) ");
 
-		columnNames.emplace_back("Core ID");
-		columnNames.emplace_back("Send Packets");
-
-
-		columnWidths.push_back(7);
-		columnWidths.push_back(narrowColumnWidth);
-
+		columnWidths.push_back(18);
+        columnWidths.push_back(18);
+        columnWidths.push_back(18);
+        columnWidths.push_back(14);
+        columnWidths.push_back(14);
+        columnWidths.push_back(11);
 	}
 };

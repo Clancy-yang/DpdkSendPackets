@@ -16,7 +16,11 @@
 #include "sys/stat.h"
 #include <unistd.h>
 
+#include <fstream>
+
 #include <unordered_map>
+
+#include <rte_ethdev.h>
 
 // 已经被读取过的pcap数据包
 unordered_map<string, int> read_pcap_map_;
@@ -121,6 +125,23 @@ int FindDirFile(const char *dir_name, vector<string> &v) {
     return 0;
 }
 
+int FindListFile(const char *dir_name, vector<string> &v){
+    //开始读取列表文件名信息
+    ifstream list(dir_name);
+    if (!list.is_open())
+    {
+        cout << dir_name << " open fail!" << endl;
+        return -1;
+    }else {
+        string filename;
+        while(getline(list,filename)){
+            v.push_back(filename);
+        }
+
+    }
+    return 0;
+}
+
 /**
  * 完成所有工作的工作线程类：从相关的DPDK端口接收数据包，将其与数据包匹配引擎进行匹配，
  * 然后将其发送到TX端口和/或将它们保存到文件。此外，它还收集数据包统计信息。
@@ -148,36 +169,44 @@ public:
 	//实现抽象方法
 	bool run(uint32_t coreId) override
 	{
-	    if(m_WorkerConfig.SendPacketsTo == nullptr) return true;
+	    if(m_WorkerConfig.SendPacketsTo == nullptr) return false;
 
 		m_CoreId = coreId;
 		m_Stop = false;
 		m_Stats.WorkerId = coreId;
 		pcpp::DpdkDevice* sendPacketsTo = m_WorkerConfig.SendPacketsTo;
-        string path = m_WorkerConfig.PcapFileDirPath;
         vector<string> v;
         struct timeval start{}, end{};
         struct stat FileInfo{};
-
+        uint64_t success_packets_num = 0;
+        uint64_t error_packets_num = 0;
 		//主循环，运行直到被告知停止
 		while (!m_Stop)
 		{
-            FindDirFile(path.c_str(), v);
-
-            if (v.empty()){
-                malloc_trim(0); // 回收内存
-                cout << "当前所有文件读取完毕.. 正在监控文件夹: " << path  << endl;
-                sleep(2);
+            if(!m_WorkerConfig.PcapFileDirPath.empty()){
+                //根据pcap所在文件夹读取pcap
+                FindDirFile(m_WorkerConfig.PcapFileDirPath.c_str(), v);
+                if (v.empty()){
+                    malloc_trim(0); // 回收内存
+                    cout << "当前所有文件读取完毕.. 正在监控文件夹: " << m_WorkerConfig.PcapFileDirPath  << endl;
+                    sleep(2);
+                }
+            }else if(!m_WorkerConfig.PcapFileListPath.empty()){
+                //根据list文件读取指定pcap
+                FindListFile(m_WorkerConfig.PcapFileListPath.c_str(), v);
+            }else{
+                return false;
             }
 
             uint32_t file_size = v.size(); // 剩余待读文件数量
             uint32_t current_num = 0;
             pcpp::RawPacket raw_packet;
             for (const string &s :v){
+                cout << "loading " << s << endl;
                 pcpp::PcapFileReaderDevice reader(s.c_str());
                 if(!reader.open()){
                     read_pcap_map_.insert(make_pair(s, 1));
-                    cout << "文件" << s << "打开失败"<<endl;
+                    cout << "文件 " << s << "打开失败"<<endl;
                     continue;
                 }
                 gettimeofday(&start, nullptr);
@@ -188,11 +217,23 @@ public:
                         gettimeofday(&end, nullptr);
                         float useTime = (end.tv_sec - start.tv_sec) + (double)(end.tv_usec - start.tv_usec)/1000000.0;
                         cout << "耗费时间: " << useTime << "(s)" << " 文件大小: " << FileInfo.st_size /1024/1024 << "(MB)"
-                                  << " 速度: " << FileInfo.st_size /1024/1024 / useTime << "(MB/s)" << endl;
+                                  << " 读取速度: " << FileInfo.st_size /1024/1024 / useTime << "(MB/s)" << endl;
                         read_pcap_map_.insert(make_pair(s, 1));
+                        m_Stats.total_number_ += FileInfo.st_size;
+
+                        struct rte_eth_stats ethStats{};
+                        if (0 == rte_eth_stats_get(m_WorkerConfig.SendPacketsPort, &ethStats)){
+                            cout << "传输包数:" << (ethStats.opackets - success_packets_num) << " 发送失败:" << (ethStats.oerrors - error_packets_num) << endl;
+                            cout << "成功率: " << ((double)(ethStats.obytes - m_Stats.send_success_number_) / (double)(FileInfo.st_size) ) * 100 << "% ";
+                            //cout << "丢包率: " << ((double)(ethStats.oerrors - error_packets_num) / (double)((ethStats.opackets - success_packets_num) + (ethStats.oerrors - error_packets_num)) ) * 100 << "% ";
+                            cout << "发送速度:" << (ethStats.obytes - m_Stats.send_success_number_)/1024/1024 / useTime << "MB/s" << endl;
+                            m_Stats.send_success_number_ = ethStats.obytes;
+                            success_packets_num = ethStats.opackets;
+                            error_packets_num = ethStats.oerrors;
+                        }
                         break; // 收尾完成，退出
                     }
-                    sendPacketsTo->sendPacket(raw_packet,0);
+                    sendPacketsTo->sendPacket(raw_packet,0, true) ? m_Stats.sendSuccess_++ : m_Stats.sendError_++;
                     m_Stats.PacketCount++;
                 }
                 if(m_Stop){
@@ -200,6 +241,8 @@ public:
                     break;
                 }
             }
+
+            if(!m_WorkerConfig.PcapFileListPath.empty()) return true; //根据list读完pcap即结束
 		}
 
 		return true;

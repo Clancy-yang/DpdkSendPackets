@@ -6,9 +6,11 @@ set(PCAPPLUSPLUS_HOME /usr/local/include/pcapplusplus)
 set(RTE_SDK lib/rte_ring_lib)
 
 set(PCAPPP_INCLUDES
+        /usr/local/include/dpdk
         ${PCAPPLUSPLUS_HOME}
         /usr/include/netinet
         ${RTE_SDK})
+
 set(PCAPPP_LIBS_DIR
         /usr/local/lib
         ${RTE_SDK})
