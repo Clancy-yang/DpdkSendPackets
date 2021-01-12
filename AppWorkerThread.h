@@ -25,6 +25,14 @@
 // 已经被读取过的pcap数据包
 unordered_map<string, int> read_pcap_map_;
 
+// 包负载结构体
+struct PacketStruct{
+    uint64_t data_len;
+    const uint8_t *data;
+    PacketStruct():data_len(0),data(nullptr){};
+    PacketStruct(uint64_t len,const uint8_t *data):data_len(len),data(data){};
+};
+
 template<typename T>
 static inline void FreeContainer(T& p_container){
     T empty;
@@ -259,3 +267,165 @@ public:
 		return m_CoreId;
 	}
 };
+
+class SendWorkerThread : public pcpp::DpdkWorkerThread
+{
+private:
+    bool m_Stop;
+    PacketStats m_Stats;
+
+    uint32_t m_CoreId;
+    SendWorkerConfig& m_WorkerConfig;
+public:
+    explicit SendWorkerThread(SendWorkerConfig& workerConfig) :
+            m_Stop(true), m_CoreId(MAX_NUM_OF_CORES+1), m_WorkerConfig(workerConfig){}
+
+    ~SendWorkerThread() override = default;// do nothing
+
+    PacketStats& getStats()
+    {
+        return m_Stats;
+    }
+
+    //实现抽象方法
+    bool run(uint32_t coreId) override
+    {
+        if(m_WorkerConfig.SendPacketsTo == nullptr) return false;
+
+        m_CoreId = coreId;
+        m_Stop = false;
+        m_Stats.WorkerId = coreId;
+        pcpp::DpdkDevice* sendPacketsTo = m_WorkerConfig.SendPacketsTo;
+
+        //主循环，运行直到被告知停止
+        while (!m_Stop)
+        {
+            pcpp::RawPacket raw_packet;
+            uint64_t rawDataLen = raw_packet.getRawDataLen();
+            sendPacketsTo->sendPacket(raw_packet,0, true) ? m_Stats.sendSuccess_++ : m_Stats.sendError_++;
+            m_Stats.PacketCount++;
+            usleep(2);
+            cout << "m_CoreId:" << m_CoreId << " SendPacketsPort:" << m_WorkerConfig.SendPacketsPort << endl;
+        }
+
+        return true;
+    }
+
+    void stop() override
+    {
+        //分配停止标志，这将导致主循环结束
+        m_Stop = true;
+    }
+
+    [[nodiscard]] uint32_t getCoreId() const override
+    {
+        return m_CoreId;
+    }
+};
+
+
+class ReadWorkerThread : public pcpp::DpdkWorkerThread
+{
+private:
+    bool m_Stop;
+    PacketStats m_Stats;
+
+    uint32_t m_CoreId;
+    ReadWorkConfig& m_WorkerConfig;
+public:
+    explicit ReadWorkerThread(ReadWorkConfig& workerConfig) :
+            m_Stop(true), m_CoreId(MAX_NUM_OF_CORES+1), m_WorkerConfig(workerConfig){}
+
+    ~ReadWorkerThread() override = default;// do nothing
+
+    PacketStats& getStats()
+    {
+        return m_Stats;
+    }
+
+    //实现抽象方法
+    bool run(uint32_t coreId) override
+    {
+        m_CoreId = coreId;
+        m_Stop = false;
+        m_Stats.WorkerId = coreId;
+        vector<string> v = m_WorkerConfig.pcapFileNameVecter;
+
+        rte_mempool* rteMempool = rte_mempool_lookup("mempool");
+        if(rteMempool == nullptr){
+            cout << "找不到 mempool " << endl;
+            exit(-2);
+        }
+
+        struct timeval start{}, end{};
+        struct stat FileInfo{};
+        uint64_t success_packets_num = 0;
+        uint64_t error_packets_num = 0;
+
+        //主循环，运行直到被告知停止
+        while (!m_Stop)
+        {
+            uint32_t file_size = v.size(); // 剩余待读文件数量
+            uint32_t current_num = 0;
+            pcpp::RawPacket raw_packet;
+            for (const string &s :v){
+                cout << "loading " << s << endl;
+                pcpp::PcapFileReaderDevice reader(s.c_str());
+                if(!reader.open()){
+                    read_pcap_map_.insert(make_pair(s, 1));
+                    cout << "文件 " << s << "打开失败"<<endl;
+                    continue;
+                }
+                gettimeofday(&start, nullptr);
+                stat(s.c_str(), &FileInfo);
+                cout << "开始读取File: " << s << "(" << ++current_num << "/" << file_size << ")" << endl;
+                while (true){
+                    if (!m_Stop && !reader.getNextPacket(raw_packet)){
+                        gettimeofday(&end, nullptr);
+                        float useTime = (end.tv_sec - start.tv_sec) + (double)(end.tv_usec - start.tv_usec)/1000000.0;
+                        cout << "耗费时间: " << useTime << "(s)" << " 文件大小: " << FileInfo.st_size /1024/1024 << "(MB)"
+                             << " 读取速度: " << FileInfo.st_size /1024/1024 / useTime << "(MB/s)" << endl;
+                        read_pcap_map_.insert(make_pair(s, 1));
+                        m_Stats.total_number_ += FileInfo.st_size;
+
+//                        struct rte_eth_stats ethStats{};
+//                        if (0 == rte_eth_stats_get(m_WorkerConfig.SendPacketsPort, &ethStats)){
+//                            cout << "传输包数:" << (ethStats.opackets - success_packets_num) << " 发送失败:" << (ethStats.oerrors - error_packets_num) << endl;
+//                            cout << "成功率: " << ((double)(ethStats.obytes - m_Stats.send_success_number_) / (double)(FileInfo.st_size) ) * 100 << "% ";
+//                            //cout << "丢包率: " << ((double)(ethStats.oerrors - error_packets_num) / (double)((ethStats.opackets - success_packets_num) + (ethStats.oerrors - error_packets_num)) ) * 100 << "% ";
+//                            cout << "发送速度:" << (ethStats.obytes - m_Stats.send_success_number_)/1024/1024 / useTime << "MB/s" << endl;
+//                            m_Stats.send_success_number_ = ethStats.obytes;
+//                            success_packets_num = ethStats.opackets;
+//                            error_packets_num = ethStats.oerrors;
+//                        }
+                        break; // 收尾完成，退出
+                    }
+                    auto* packetStruct = new PacketStruct(raw_packet.getRawDataLen(),raw_packet.getRawData());
+
+
+                    //sendPacketsTo->sendPacket(raw_packet,0, true) ? m_Stats.sendSuccess_++ : m_Stats.sendError_++;
+                    m_Stats.PacketCount++;
+                }
+                if(m_Stop){
+                    reader.close();
+                    break;
+                }
+            }
+        }
+
+        return true;
+    }
+
+    void stop() override
+    {
+        //分配停止标志，这将导致主循环结束
+        m_Stop = true;
+    }
+
+    [[nodiscard]] uint32_t getCoreId() const override
+    {
+        return m_CoreId;
+    }
+};
+
+

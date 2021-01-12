@@ -51,6 +51,9 @@ void onApplicationInterrupted(void* cookie);
 
 void printUsage();
 
+//指定调用的核心(从哪到哪)
+CoreMask GenCoreNums(uint16_t start, uint16_t end);
+
 int main(int argc, char* argv[]) {
     //展示基本信息
     AppName::init(argc, argv);
@@ -58,6 +61,9 @@ int main(int argc, char* argv[]) {
 
     //DPDK发送端口
     int sendPacketsToPort = -1;
+
+    //读包所用核心数
+    uint16_t readPcapCoreNum = 1;
 
     int optionIndex = 0;
     char opt = 0;
@@ -86,6 +92,11 @@ int main(int argc, char* argv[]) {
                 pcapListPath = string(optarg);
                 break;
             }
+            case 'c':
+            {
+                readPcapCoreNum = atoi(optarg);
+                break;
+            }
             case 'l':
             {
                 listDpdkPorts();
@@ -104,19 +115,36 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    if(pcapDirPath.empty() && pcapListPath.empty()){
+    //读取文件目录
+    vector<string> pcapFileNameVecter;
+    if(!pcapDirPath.empty()){
+        //根据pcap所在文件夹读取pcap
+        FindDirFile(pcapDirPath.c_str(), pcapFileNameVecter);
+    }else if(!pcapListPath.empty()){
+        //根据list文件读取指定pcap
+        FindListFile(pcapListPath.c_str(), pcapFileNameVecter);
+    }else{
         printUsage();
         exit(0);
     }
+    if(pcapFileNameVecter.empty()){
+        cout << "未读取到pcap" << endl;
+        exit(0);
+    } else
+        cout << "找到" << pcapFileNameVecter.size() << "个文件" << endl;
 
     //为机器上可用的所有核心创建核心掩码
-    CoreMask coreMaskToUse = getCoreMaskForAllMachineCores();
+    //CoreMask coreMaskToUse = getCoreMaskForAllMachineCores();
 
     //缓冲池大小
     uint32_t mBufPoolSize = DEFAULT_MBUF_POOL_SIZE;
 
     //从核心遮罩中提取核心向量
     vector<SystemCore> coresToUse;
+    //核心数 = 主程序 + 发包 + 读文件
+    uint16_t allUseCoreNum = 1 + 1 + readPcapCoreNum;
+    //为机器上可用的指定核心创建核心掩码
+    CoreMask coreMaskToUse = GenCoreNums(0,allUseCoreNum);
     createCoreVectorFromCoreMask(coreMaskToUse, coresToUse);
 
     //至少需要2个核心才能启动-1个管理核心+ 1个（或更多）辅助线程
@@ -124,6 +152,10 @@ int main(int argc, char* argv[]) {
 
     //初始化DPDK
     if (!DpdkDeviceList::initDpdk(coreMaskToUse, mBufPoolSize)) EXIT_WITH_ERROR("Couldn't initialize DPDK");
+
+    //保留发包核心,屏蔽主核心和读包核心
+//    CoreMask sendPacketCore = GenCoreNums(2,allUseCoreNum) | 1;
+//    coreMaskToUse = coreMaskToUse & ~sendPacketCore;
 
     //从核心屏蔽中删除DPDK主核心，因为DPDK工作线程无法在主核心上运行
     coreMaskToUse = coreMaskToUse & ~(DpdkDeviceList::getInstance().getDpdkMasterCore().Mask);
@@ -137,22 +169,33 @@ int main(int argc, char* argv[]) {
     if (sendPacketsTo != nullptr && !sendPacketsTo->isOpened() &&  !sendPacketsTo->open())
         EXIT_WITH_ERROR("Could not open port#%d for sending matched packets", sendPacketsToPort);
 
-    //工作线程配置结构体数组 每个核心绑定一个工作线程配置结构体
-    AppWorkerConfig workerConfigArr[coresToUse.size()];
-    workerConfigArr[0].CoreId = coresToUse[0].Id;
-    workerConfigArr[0].SendPacketsTo = sendPacketsTo;
-    workerConfigArr[0].SendPacketsPort = sendPacketsToPort;
-    workerConfigArr[0].PcapFileDirPath = pcapDirPath;
-    workerConfigArr[0].PcapFileListPath = pcapListPath;
+    //初始化rte_ring
+    if(rte_ring_create("rte_ring",262144,(uint)rte_socket_id(),0) == nullptr){
+        cout << "创建 rte_ring 失败!" << endl;
+        exit(-1);
+    }
+
+    //初始化mempool
+    if(rte_mempool_create("mempool", 65536, (2048 + sizeof(struct rte_mbuf) + RTE_PKTMBUF_HEADROOM), 32, sizeof(struct rte_pktmbuf_pool_private),
+                                               rte_pktmbuf_pool_init, nullptr, rte_pktmbuf_init, nullptr, (uint)rte_socket_id(),
+                                               0) == nullptr){
+        cout << "创建 mempool 失败!" << endl;
+        exit(-1);
+    }
 
     //为每个核心创建工作线程
     vector<DpdkWorkerThread*> workerThreadVec;
-    int i = 0;
-    for (auto iter = coresToUse.begin(); iter != coresToUse.end(); iter++)
-    {
-        auto* newWorker = new AppWorkerThread(workerConfigArr[i]);
-        workerThreadVec.push_back(newWorker);
-        i++;
+
+    //发送工作线程配置
+    SendWorkerConfig sendWorkerConfig(1,sendPacketsTo,sendPacketsToPort);
+    auto* sendWorkerThread = new SendWorkerThread(sendWorkerConfig);
+    workerThreadVec.push_back(sendWorkerThread);
+
+    //读包工作线程配置
+    for(int i = 0; i<(allUseCoreNum-2); ++i){
+        ReadWorkConfig readWorkConfig(i + 2,pcapFileNameVecter);
+        auto* readWorkerThread = new ReadWorkerThread(readWorkConfig);
+        workerThreadVec.push_back(readWorkerThread);
     }
 
     //启动所有工作线程
@@ -250,5 +293,13 @@ void printUsage()
            "./DpdkSendPackets -s 0 -a /data/pcap            设置DPDK发包端口0读取目录/data/pcap包\n"
            //"./DpdkSendPackets -s 0 -b /data/send_pcap.list  设置DPDK发包端口0读取目录/data/send_pcap.list文件中包地址\n"
            , AppName::get().c_str());
+}
+
+CoreMask GenCoreNums(uint16_t start, uint16_t end){
+    CoreMask result = 0;
+    for (uint16_t i = start; i <= end; i++) {
+        result |= 1 << i;
+    }
+    return result;
 }
 

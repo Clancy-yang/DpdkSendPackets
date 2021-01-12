@@ -56,6 +56,40 @@ struct AppWorkerConfig
 	{}
 };
 
+//发包配置
+struct SendWorkerConfig{
+    //核心id
+    uint32_t CoreId;
+    //发送数据包的DPDK设备和端口
+    pcpp::DpdkDevice* SendPacketsTo;
+    uint16_t SendPacketsPort;
+    //构造
+    SendWorkerConfig():
+    CoreId(MAX_NUM_OF_CORES+1),
+    SendPacketsTo(nullptr),
+    SendPacketsPort(0)
+    {};
+    SendWorkerConfig(uint32_t CoreId,pcpp::DpdkDevice* SendPacketsTo,uint16_t SendPacketsPort):
+    CoreId(CoreId),SendPacketsTo(SendPacketsTo),SendPacketsPort(SendPacketsPort)
+    {};
+};
+
+//读包配置
+struct ReadWorkConfig{
+//核心id
+    uint32_t CoreId;
+    //文件名称列表
+    vector<string> pcapFileNameVecter;
+    //构造
+    ReadWorkConfig():
+    CoreId(MAX_NUM_OF_CORES+1)
+    {};
+    ReadWorkConfig(uint32_t CoreId,const vector<string> &pcapFileNameVecter):
+    CoreId(CoreId),
+    pcapFileNameVecter(pcapFileNameVecter)
+    {};
+};
+
 
 /**
  * 收集和分析数据包和流量统计

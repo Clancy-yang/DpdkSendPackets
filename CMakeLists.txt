@@ -3,22 +3,26 @@ project(DpdkSendPackets)
 set(CMAKE_CXX_STANDARD 17)
 
 set(PCAPPLUSPLUS_HOME /usr/local/include/pcapplusplus)
-set(RTE_SDK lib/rte_ring_lib)
+#set(RTE_SDK lib/rte_ring_lib)
+set(RTE_INC /usr/local/include/dpdk)
+#set(RTE_LIB /usr/local/lib)
 
 set(PCAPPP_INCLUDES
-        /usr/local/include/dpdk
+        ${RTE_INC}
         ${PCAPPLUSPLUS_HOME}
         /usr/include/netinet
-        ${RTE_SDK})
+        #${RTE_SDK}
+        )
 
 set(PCAPPP_LIBS_DIR
         /usr/local/lib
-        ${RTE_SDK})
+        #${RTE_SDK}
+        )
 
 include_directories(${PCAPPP_INCLUDES})
 link_directories(${PCAPPP_LIBS_DIR})
 
-add_subdirectory(${RTE_SDK})
+#add_subdirectory(${RTE_SDK})
 
 set(CXXFLAGS
         -O2
