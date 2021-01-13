@@ -45,6 +45,10 @@ struct AppWorkerConfig
 	//发送数据包的DPDK设备和端口
 	pcpp::DpdkDevice* SendPacketsTo;
     uint16_t SendPacketsPort = 0;
+    //发送速度(Mbps)
+    uint16_t send_speed = 0;
+    //设备是否支持限速
+    bool dev_speed_limit = true;
 	//读文件目录
 	string PcapFileDirPath;
 	//读文件列表
@@ -69,7 +73,7 @@ public:
     uint64_t sendSuccess_ = 0;//包数
 	uint64_t sendError_ = 0;
 	uint64_t send_success_number_ = 0;//数据量
-	uint64_t total_number_ = 0;
+	uint64_t total_number_ = 0; //负载总数据量
 
 	PacketStats() : WorkerId(MAX_NUM_OF_CORES+1), PacketCount(0){}
 
@@ -111,8 +115,8 @@ public:
 		columnNames.emplace_back("  总发送数据包数  ");
         columnNames.emplace_back(" 发送成功数据包数 ");
         columnNames.emplace_back(" 发送失败数据包数 ");
-        columnNames.emplace_back("全部数据量(GB)");
-        columnNames.emplace_back("成功数据量(GB)");
+        columnNames.emplace_back("负载数据量(GB)");
+        columnNames.emplace_back("传输数据量(GB)");
         columnNames.emplace_back(" 成功率(%) ");
 
 		columnWidths.push_back(18);

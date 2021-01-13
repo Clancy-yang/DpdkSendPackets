@@ -24,6 +24,7 @@ static struct option FilterTrafficOptions[] =
                 {"s",  required_argument, 0, 's'},
                 {"pcap-dir-path",  required_argument, 0, 'a'},
                 {"pcap-list-path",  required_argument, 0, 'b'},
+                {"speed",  required_argument, 0, 'p'},
                 {"list", optional_argument, 0, 'l'},
                 {"help", optional_argument, 0, 'h'},
                 {0, 0, 0, 0}
@@ -34,6 +35,7 @@ struct FiltetTrafficArgs
 {
     bool shouldStop;
     std::vector<DpdkWorkerThread*>* workerThreadsVector;
+    int sendPacketsToPort = -1;
     FiltetTrafficArgs() : shouldStop(false), workerThreadsVector(nullptr) {}
 };
 
@@ -63,7 +65,10 @@ int main(int argc, char* argv[]) {
     char opt = 0;
     string pcapDirPath,pcapListPath;
 
-    while((opt = getopt_long (argc, argv, "s:a:b:lh", FilterTrafficOptions, &optionIndex)) != -1)
+    //发送速度(Mbps)
+    uint16_t send_speed = 0;
+
+    while((opt = getopt_long (argc, argv, "s:a:b:p:lh", FilterTrafficOptions, &optionIndex)) != -1)
     {
         switch (opt)
         {
@@ -84,6 +89,11 @@ int main(int argc, char* argv[]) {
             case 'b':
             {
                 pcapListPath = string(optarg);
+                break;
+            }
+            case 'p':
+            {
+                send_speed = atoi(optarg);
                 break;
             }
             case 'l':
@@ -144,6 +154,58 @@ int main(int argc, char* argv[]) {
     workerConfigArr[0].SendPacketsPort = sendPacketsToPort;
     workerConfigArr[0].PcapFileDirPath = pcapDirPath;
     workerConfigArr[0].PcapFileListPath = pcapListPath;
+    workerConfigArr[0].send_speed = send_speed;
+
+    rte_eth_dev_info dev_info{};
+    rte_eth_dev_info_get(sendPacketsToPort,&dev_info);
+    cout << "speed_capa:" << dev_info.speed_capa << endl;
+    cout << "nb_tx_queues:" << dev_info.nb_tx_queues<< endl;
+    cout << "nb_rx_queues:" << dev_info.nb_rx_queues<< endl;
+
+    if(rte_eth_dev_start(sendPacketsToPort) == 0){
+        cout << "rte_eth_dev_start success!" << endl;
+    }else{
+        cout << "rte_eth_dev_start error!" << endl;
+    }
+
+    if(rte_eth_dev_set_link_up(sendPacketsToPort) == 0){
+        cout << "rte_eth_dev_set_link_up success!" << endl;
+    }else{
+        cout << "rte_eth_dev_set_link_up error!" << endl;
+    }
+
+    struct rte_eth_dev *dev;
+    dev = &rte_eth_devices[sendPacketsToPort];
+    if(dev->data->dev_link.link_speed == 0){
+        dev->data->dev_link.link_speed = 10000;
+    }else{
+        cout << "link_speed = "<< dev->data->dev_link.link_speed << endl;
+    }
+
+    if(send_speed != 0) {
+        int limit_stat = rte_eth_set_queue_rate_limit(sendPacketsToPort, 0, send_speed);
+        if (limit_stat != 0) {
+            switch (limit_stat) {
+                case -ENOTSUP:
+                    cout << "硬件不支持此功能" << endl;
+                    break;
+                case -ENODEV:
+                    cout << "port id 无效" << endl;
+                    break;
+                case -EIO:
+                    cout << "设备已卸载" << endl;
+                    break;
+                case -EINVAL:
+                    cout << "参数错误" << endl;
+                    break;
+                default:
+                    cout << "限速失败:"<< limit_stat << endl;
+                    break;
+            }
+            cout << "采用 usleep 模式,请手动调节限速大小" << endl;
+            workerConfigArr[0].dev_speed_limit = false;
+        }
+    }
 
     //为每个核心创建工作线程
     vector<DpdkWorkerThread*> workerThreadVec;
@@ -162,10 +224,10 @@ int main(int argc, char* argv[]) {
     //注册应用程序关闭事件，以在应用程序终止时打印摘要统计信息
     FiltetTrafficArgs args;
     args.workerThreadsVector = &workerThreadVec;
+    args.sendPacketsToPort = sendPacketsToPort;
     ApplicationEventHandler::getInstance().onApplicationInterrupted(onApplicationInterrupted, &args);
-
     //无限循环（直到程序终止）
-    while (!args.shouldStop) sleep(5);
+    while (!args.shouldStop) usleep(5);
 
     return 0;
 }
@@ -228,6 +290,9 @@ void onApplicationInterrupted(void* cookie)
 
     printer.printRow(aggregatedStats.getStatValuesAsString("|"), '|');
 
+    rte_eth_dev_set_link_down(args->sendPacketsToPort);
+
+
     args->shouldStop = true;
 }
 
@@ -242,6 +307,7 @@ void printUsage()
            "    -l                           : DPDK端口列表\n"
            "    -s                           : 绑定dpdk发包端口\n"
            "    -a                           : pcap包所在目录\n"
+           "    -p                           : 发送速度(Mb/s)\n"
            //"    -b                           : pcap包的list文件\n"
            "------\n"
            "\n流程:\n\n"
@@ -249,6 +315,7 @@ void printUsage()
            "./DpdkSendPackets -l  查看DPDK支持端口列表\n"
            "./DpdkSendPackets -s 0 -a /data/pcap            设置DPDK发包端口0读取目录/data/pcap包\n"
            //"./DpdkSendPackets -s 0 -b /data/send_pcap.list  设置DPDK发包端口0读取目录/data/send_pcap.list文件中包地址\n"
+           "./DpdkSendPackets -s 0 -a /data/pcap -p 1000    设置DPDK发包端口0读取目录/data/pcap包,发送速度为1000Mb/s\n"
            , AppName::get().c_str());
 }
 

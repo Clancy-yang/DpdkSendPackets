@@ -179,7 +179,8 @@ public:
         struct timeval start{}, end{};
         struct stat FileInfo{};
         uint64_t success_packets_num = 0;
-        uint64_t error_packets_num = 0;
+        uint64_t packet_count = 0;
+        struct rte_eth_stats ethStats{};
 		//主循环，运行直到被告知停止
 		while (!m_Stop)
 		{
@@ -202,38 +203,76 @@ public:
             uint32_t current_num = 0;
             pcpp::RawPacket raw_packet;
             for (const string &s :v){
-                cout << "loading " << s << endl;
+                cout << "================ loading ================" << endl;
                 pcpp::PcapFileReaderDevice reader(s.c_str());
                 if(!reader.open()){
                     read_pcap_map_.insert(make_pair(s, 1));
                     cout << "文件 " << s << "打开失败"<<endl;
                     continue;
                 }
-                gettimeofday(&start, nullptr);
                 stat(s.c_str(), &FileInfo);
                 cout << "开始读取File: " << s << "(" << ++current_num << "/" << file_size << ")" << endl;
+
+                //包负载总数
+                uint64_t success_payload_num = 0;
+                uint64_t error_payload_num = 0;
+
+                gettimeofday(&start, nullptr);
                 while (true){
                     if (!m_Stop && !reader.getNextPacket(raw_packet)){
-                        gettimeofday(&end, nullptr);
-                        float useTime = (end.tv_sec - start.tv_sec) + (double)(end.tv_usec - start.tv_usec)/1000000.0;
-                        cout << "耗费时间: " << useTime << "(s)" << " 文件大小: " << FileInfo.st_size /1024/1024 << "(MB)"
-                                  << " 读取速度: " << FileInfo.st_size /1024/1024 / useTime << "(MB/s)" << endl;
-                        read_pcap_map_.insert(make_pair(s, 1));
-                        m_Stats.total_number_ += FileInfo.st_size;
+                        //预计总用时 us (FileInfo.st_size / m_WorkerConfig.send_speed * 1024 *1024) * 1000 * 1000
+                        uint64_t total_use_time =  ((success_payload_num + error_payload_num * 1000 * 1000) / (m_WorkerConfig.send_speed * 1024 *1024));
+                        cout << "预计用时:" << total_use_time << "us" << endl;
 
-                        struct rte_eth_stats ethStats{};
-                        if (0 == rte_eth_stats_get(m_WorkerConfig.SendPacketsPort, &ethStats)){
-                            cout << "传输包数:" << (ethStats.opackets - success_packets_num) << " 发送失败:" << (ethStats.oerrors - error_packets_num) << endl;
-                            cout << "成功率: " << ((double)(ethStats.obytes - m_Stats.send_success_number_) / (double)(FileInfo.st_size) ) * 100 << "% ";
-                            //cout << "丢包率: " << ((double)(ethStats.oerrors - error_packets_num) / (double)((ethStats.opackets - success_packets_num) + (ethStats.oerrors - error_packets_num)) ) * 100 << "% ";
-                            cout << "发送速度:" << (ethStats.obytes - m_Stats.send_success_number_)/1024/1024 / useTime << "MB/s" << endl;
-                            m_Stats.send_success_number_ = ethStats.obytes;
-                            success_packets_num = ethStats.opackets;
-                            error_packets_num = ethStats.oerrors;
+                        gettimeofday(&end, nullptr);
+                        //实际使用时间
+                        float true_use_time = (end.tv_sec - start.tv_sec) + (double)(end.tv_usec - start.tv_usec)/1000000.0;
+                        cout << "耗费时间: " << true_use_time << "(s)" << " 文件大小: " << FileInfo.st_size/1024/1024 << "(MB)"
+                             << " 读取速度: " << FileInfo.st_size/1024/1024 / true_use_time << "(MB/s)" << endl;
+                        read_pcap_map_.insert(make_pair(s, 1));
+                        //m_Stats.total_number_ += FileInfo.st_size;
+
+                        //设备是否支持限速 不支持则采用 usleep模式
+                        if(!m_WorkerConfig.dev_speed_limit){
+                            //预计睡眠时间 = 预计总用时 - 实际用时
+                            int64_t sleep_time = total_use_time - uint64_t(true_use_time * 1000 * 1000);
+                            cout << "睡眠时间:" << sleep_time << "us 实际用时:" << uint64_t(true_use_time * 1000 * 1000) << "us" << endl;
+                            if(sleep_time > 0)
+                                usleep(sleep_time);
+
+                            gettimeofday(&end, nullptr);
                         }
+
+                        float useTime = (end.tv_sec - start.tv_sec) + (double)(end.tv_usec - start.tv_usec)/1000000.0;
+
+                        //struct rte_eth_stats ethStats{};
+                        if (0 == rte_eth_stats_get(m_WorkerConfig.SendPacketsPort, &ethStats)){
+                            cout << "网卡信息:" << endl;
+                            cout << "传输包数:" << (ethStats.opackets - success_packets_num);
+                            cout << " 传输数据:" << (double)(ethStats.obytes - m_Stats.send_success_number_)/1024/1024 << "(MB)" << endl;
+
+                            cout << "统计信息:" << endl;
+                            cout << "读取包数:" << (m_Stats.PacketCount - packet_count);
+                            cout << " 负载数据:" << (double)(success_payload_num + error_payload_num)/1024/1024 << "(MB)" << endl;
+
+                            cout << "发送成功:" << (double)(success_payload_num)/1024/1024 << "(MB) 发送失败:" << (double)(error_payload_num)/1024/1024 << "(MB)" << endl;
+                            cout << "成功率: " << ((double)(success_payload_num) / (double)(success_payload_num + error_payload_num) ) * 100 << "% ";
+                            cout << "发送速度:" << (ethStats.obytes - m_Stats.send_success_number_)/1024/128 / useTime << "Mb/s" << endl;
+
+                            packet_count = m_Stats.PacketCount;
+                            success_packets_num = ethStats.opackets;
+                            m_Stats.send_success_number_ = ethStats.obytes;
+                        }
+                        m_Stats.total_number_ += (success_payload_num + error_payload_num);
                         break; // 收尾完成，退出
                     }
-                    sendPacketsTo->sendPacket(raw_packet,0, true) ? m_Stats.sendSuccess_++ : m_Stats.sendError_++;
+                    if(sendPacketsTo->sendPacket(raw_packet,0,true)){
+                        success_payload_num += raw_packet.getRawDataLen();
+                        m_Stats.sendSuccess_++;
+                    }else{
+                        error_payload_num += raw_packet.getRawDataLen();
+                        m_Stats.sendError_++;
+                    }
                     m_Stats.PacketCount++;
                 }
                 if(m_Stop){
