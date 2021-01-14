@@ -32,6 +32,19 @@ using namespace std;
 
 typedef map<pcpp::DpdkDevice*, vector<int> > InputDataConfig;
 
+struct FileListStruct{
+    char file_name[200]{};
+    uint8_t * data = nullptr;
+};
+
+struct PacketStruct{
+    uint64_t coreId = 0;
+    uint64_t index = 0;
+    bool packet_end = false;
+    char pcap_name[128]{};
+    pcpp::RawPacket* rawPacket = nullptr;
+};
+
 
 /**
  * 包含工作线程所需的所有配置，包括：
@@ -63,6 +76,8 @@ struct SendWorkerConfig{
     //发送数据包的DPDK设备和端口
     pcpp::DpdkDevice* SendPacketsTo;
     uint16_t SendPacketsPort;
+    //读pcap包核心数
+    uint16_t ReadPcapCoreNum = 0;
     //构造
     SendWorkerConfig():
     CoreId(MAX_NUM_OF_CORES+1),
@@ -79,12 +94,14 @@ struct ReadWorkConfig{
 //核心id
     uint32_t CoreId;
     //文件名称列表
-    vector<string> pcapFileNameVecter;
+    vector<string> *pcapFileNameVecter = nullptr;
+    //读pcap包核心数
+    uint16_t ReadPcapCoreNum = 0;
     //构造
     ReadWorkConfig():
     CoreId(MAX_NUM_OF_CORES+1)
     {};
-    ReadWorkConfig(uint32_t CoreId,const vector<string> &pcapFileNameVecter):
+    ReadWorkConfig(uint32_t CoreId, vector<string> *pcapFileNameVecter):
     CoreId(CoreId),
     pcapFileNameVecter(pcapFileNameVecter)
     {};

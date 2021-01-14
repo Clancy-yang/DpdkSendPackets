@@ -24,6 +24,7 @@ static struct option FilterTrafficOptions[] =
                 {"s",  required_argument, 0, 's'},
                 {"pcap-dir-path",  required_argument, 0, 'a'},
                 {"pcap-list-path",  required_argument, 0, 'b'},
+                {"c",  required_argument, 0, 'c'},
                 {"list", optional_argument, 0, 'l'},
                 {"help", optional_argument, 0, 'h'},
                 {0, 0, 0, 0}
@@ -69,7 +70,7 @@ int main(int argc, char* argv[]) {
     char opt = 0;
     string pcapDirPath,pcapListPath;
 
-    while((opt = getopt_long (argc, argv, "s:a:b:lh", FilterTrafficOptions, &optionIndex)) != -1)
+    while((opt = getopt_long (argc, argv, "s:a:b:c:lh", FilterTrafficOptions, &optionIndex)) != -1)
     {
         switch (opt)
         {
@@ -134,7 +135,7 @@ int main(int argc, char* argv[]) {
         cout << "找到" << pcapFileNameVecter.size() << "个文件" << endl;
 
     //为机器上可用的所有核心创建核心掩码
-    //CoreMask coreMaskToUse = getCoreMaskForAllMachineCores();
+//    CoreMask coreMaskToUse = getCoreMaskForAllMachineCores();
 
     //缓冲池大小
     uint32_t mBufPoolSize = DEFAULT_MBUF_POOL_SIZE;
@@ -153,54 +154,81 @@ int main(int argc, char* argv[]) {
     //初始化DPDK
     if (!DpdkDeviceList::initDpdk(coreMaskToUse, mBufPoolSize)) EXIT_WITH_ERROR("Couldn't initialize DPDK");
 
+    cout <<"coreMaskToUse:" << coreMaskToUse << " coresToUse:" << coresToUse.size() << endl;
     //保留发包核心,屏蔽主核心和读包核心
 //    CoreMask sendPacketCore = GenCoreNums(2,allUseCoreNum) | 1;
 //    coreMaskToUse = coreMaskToUse & ~sendPacketCore;
 
+
     //从核心屏蔽中删除DPDK主核心，因为DPDK工作线程无法在主核心上运行
     coreMaskToUse = coreMaskToUse & ~(DpdkDeviceList::getInstance().getDpdkMasterCore().Mask);
+//    cout << "DpdkDeviceList::getInstance().getDpdkMasterCore().Mask:" << DpdkDeviceList::getInstance().getDpdkMasterCore().Mask << endl;
+
 
     //删除主核心后重新计算要使用的核心
     coresToUse.clear();
     createCoreVectorFromCoreMask(coreMaskToUse, coresToUse);
+
+    cout <<"coreMaskToUse:" << coreMaskToUse << " coresToUse:" << coresToUse.size() << endl;
 
     //获取DPDK设备以向其发送数据包（如果不存在，则为NULL）
     DpdkDevice* sendPacketsTo = DpdkDeviceList::getInstance().getDeviceByPort(sendPacketsToPort);
     if (sendPacketsTo != nullptr && !sendPacketsTo->isOpened() &&  !sendPacketsTo->open())
         EXIT_WITH_ERROR("Could not open port#%d for sending matched packets", sendPacketsToPort);
 
-    //初始化rte_ring
-    if(rte_ring_create("rte_ring",262144,(uint)rte_socket_id(),0) == nullptr){
-        cout << "创建 rte_ring 失败!" << endl;
-        exit(-1);
+    //初始化rte_ring 和 mempool
+    for(int i = 0; i < readPcapCoreNum; ++i){
+        //创建rte_ring
+        string ring_tag = "rte_ring_" + to_string(i);
+        if(rte_ring_create(ring_tag.c_str(),262144,(uint)rte_socket_id(),0) == nullptr){
+            cout << "创建 " << ring_tag << " 失败!" << endl;
+            exit(-1);
+        }
+
+        //创建mempool
+        string mempool_tag = "mempool_" + to_string(i);
+        if(rte_mempool_create(mempool_tag.c_str(), 65536, (2048 + sizeof(struct rte_mbuf) + RTE_PKTMBUF_HEADROOM), 32, sizeof(struct rte_pktmbuf_pool_private),
+                              rte_pktmbuf_pool_init, nullptr, rte_pktmbuf_init, nullptr, (uint)rte_socket_id(),
+                              0) == nullptr){
+            cout << "创建 " << mempool_tag << " 失败!" << endl;
+            exit(-1);
+        }
     }
 
-    //初始化mempool
-    if(rte_mempool_create("mempool", 65536, (2048 + sizeof(struct rte_mbuf) + RTE_PKTMBUF_HEADROOM), 32, sizeof(struct rte_pktmbuf_pool_private),
-                                               rte_pktmbuf_pool_init, nullptr, rte_pktmbuf_init, nullptr, (uint)rte_socket_id(),
-                                               0) == nullptr){
-        cout << "创建 mempool 失败!" << endl;
-        exit(-1);
-    }
+//    struct rte_ring *ring = rte_ring_create("message_ring",262144, (uint)rte_socket_id(), 0);
+//    struct rte_mempool *message_pool = rte_mempool_create("message_pool", 65536,2048 + sizeof(struct rte_mbuf) + RTE_PKTMBUF_HEADROOM, 32, 0,
+//            NULL, NULL, NULL, NULL,rte_socket_id(), 0);
+//
+//    if(ring == nullptr || message_pool == nullptr){
+//        cout << "ring 或 mempool 创建失败 " << endl;
+//        exit(-1);
+//    }
+
+    //根据pcap所在文件夹读取pcap
+//    vector<string> pcap_file_name_vector;
+//    FindDirFile(pcapDirPath.c_str(), pcap_file_name_vector);
+
 
     //为每个核心创建工作线程
     vector<DpdkWorkerThread*> workerThreadVec;
 
     //发送工作线程配置
     SendWorkerConfig sendWorkerConfig(1,sendPacketsTo,sendPacketsToPort);
+    sendWorkerConfig.ReadPcapCoreNum = readPcapCoreNum;
     auto* sendWorkerThread = new SendWorkerThread(sendWorkerConfig);
     workerThreadVec.push_back(sendWorkerThread);
 
     //读包工作线程配置
-    for(int i = 0; i<(allUseCoreNum-2); ++i){
-        ReadWorkConfig readWorkConfig(i + 2,pcapFileNameVecter);
+    for(int i = 0; i < readPcapCoreNum; ++i){
+        ReadWorkConfig readWorkConfig(i,&pcapFileNameVecter);
+        readWorkConfig.ReadPcapCoreNum = readPcapCoreNum;
         auto* readWorkerThread = new ReadWorkerThread(readWorkConfig);
         workerThreadVec.push_back(readWorkerThread);
     }
-
+    cout << "workerThreadVec:" << workerThreadVec.size() << " coreMaskToUse:" << coreMaskToUse << endl;
     //启动所有工作线程
     if (!DpdkDeviceList::getInstance().startDpdkWorkerThreads(coreMaskToUse, workerThreadVec))
-        EXIT_WITH_ERROR("Couldn't start worker threads");
+        EXIT_WITH_ERROR("Couldn't start worker threads:");
 
     //注册应用程序关闭事件，以在应用程序终止时打印摘要统计信息
     FiltetTrafficArgs args;
@@ -297,7 +325,7 @@ void printUsage()
 
 CoreMask GenCoreNums(uint16_t start, uint16_t end){
     CoreMask result = 0;
-    for (uint16_t i = start; i <= end; i++) {
+    for (uint16_t i = start; i < end; i++) {
         result |= 1 << i;
     }
     return result;

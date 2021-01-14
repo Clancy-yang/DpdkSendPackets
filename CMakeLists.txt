@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.17)
 project(DpdkSendPackets)
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 11)
 
 set(PCAPPLUSPLUS_HOME /usr/local/include/pcapplusplus)
 #set(RTE_SDK lib/rte_ring_lib)
@@ -32,11 +32,12 @@ set(CXXFLAGS
 set(PCAPPP_BUILD_FLAGS
         -fPIC
         -DPCAPPP_CPP_FEATURE_DETECTION
-        -std=c++17
+        -std=c++11
         ${CXXFLAGS}
         -msse
         -msse2
         -msse3
+        -msse4.1
         -Wall)
 
 add_compile_options(${PCAPPP_BUILD_FLAGS})

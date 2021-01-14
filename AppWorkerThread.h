@@ -26,12 +26,12 @@
 unordered_map<string, int> read_pcap_map_;
 
 // 包负载结构体
-struct PacketStruct{
-    uint64_t data_len;
-    const uint8_t *data;
-    PacketStruct():data_len(0),data(nullptr){};
-    PacketStruct(uint64_t len,const uint8_t *data):data_len(len),data(data){};
-};
+//struct PacketStruct{
+//    uint64_t data_len;
+//    const uint8_t *data;
+//    PacketStruct():data_len(0),data(nullptr){};
+//    PacketStruct(uint64_t len,const uint8_t *data):data_len(len),data(data){};
+//};
 
 template<typename T>
 static inline void FreeContainer(T& p_container){
@@ -297,15 +297,50 @@ public:
         m_Stats.WorkerId = coreId;
         pcpp::DpdkDevice* sendPacketsTo = m_WorkerConfig.SendPacketsTo;
 
+        rte_ring* ring_arr[m_WorkerConfig.ReadPcapCoreNum];
+        rte_mempool* mempool_arr[m_WorkerConfig.ReadPcapCoreNum];
+
+        for(int i = 0; i < m_WorkerConfig.ReadPcapCoreNum; ++i){
+            //查找rte_ring
+            string ring_tag = "rte_ring_" + to_string(i);
+            ring_arr[i] = rte_ring_lookup(ring_tag.c_str());
+            if(ring_arr[i] == nullptr){
+                cout << "查找 " << ring_tag << " 失败!" << endl;
+                exit(-1);
+            }
+            //查找mempool
+            string mempool_tag = "mempool_" + to_string(i);
+            mempool_arr[i] = rte_mempool_lookup(mempool_tag.c_str());
+            if(mempool_arr[i] == nullptr){
+                cout << "查找 " << mempool_tag << " 失败!" << endl;
+                exit(-1);
+            }
+        }
+
+        int ring_num = 0;
         //主循环，运行直到被告知停止
         while (!m_Stop)
         {
-            pcpp::RawPacket raw_packet;
-            uint64_t rawDataLen = raw_packet.getRawDataLen();
-            sendPacketsTo->sendPacket(raw_packet,0, true) ? m_Stats.sendSuccess_++ : m_Stats.sendError_++;
+            void *msg = nullptr;
+            while (rte_ring_dequeue(ring_arr[ring_num], &msg) < 0){
+                cout << "ring " << ring_num << "未生成,等待中!" << endl;
+                usleep(10);
+            }
+            auto* packetStruct = (PacketStruct*)msg;
+            //cout << "ring_num:" << ring_num <<" SendWorkerThread:" << m_CoreId <<" from:"<< packetStruct->coreId <<" pcap_name:" << packetStruct->pcap_name << " index:"<< packetStruct->index << endl;
+            //ring的一个包已发完
+            if(packetStruct->packet_end){
+                ++ring_num %= m_WorkerConfig.ReadPcapCoreNum;
+                cout << "ring_num:" << ring_num <<" SendWorkerThread:" << m_CoreId <<" from:"<< packetStruct->coreId <<" pcap_name:" << packetStruct->pcap_name << " index:"<< packetStruct->index << endl;
+                continue;
+            }
+            //cout << "rawPacket:" << packetStruct->rawPacket->getRawDataLen() << endl;
+            sendPacketsTo->sendPacket(*(packetStruct->rawPacket),0, true) ? m_Stats.sendSuccess_++ : m_Stats.sendError_++;
+            delete packetStruct->rawPacket;
+            packetStruct->rawPacket = nullptr;
             m_Stats.PacketCount++;
-            usleep(2);
-            cout << "m_CoreId:" << m_CoreId << " SendPacketsPort:" << m_WorkerConfig.SendPacketsPort << endl;
+            usleep(10);
+            rte_mempool_put(mempool_arr[ring_num], msg);
         }
 
         return true;
@@ -349,68 +384,101 @@ public:
         m_CoreId = coreId;
         m_Stop = false;
         m_Stats.WorkerId = coreId;
-        vector<string> v = m_WorkerConfig.pcapFileNameVecter;
-
-        rte_mempool* rteMempool = rte_mempool_lookup("mempool");
-        if(rteMempool == nullptr){
-            cout << "找不到 mempool " << endl;
-            exit(-2);
-        }
+        vector<string> v = *(m_WorkerConfig.pcapFileNameVecter);
 
         struct timeval start{}, end{};
         struct stat FileInfo{};
-        uint64_t success_packets_num = 0;
-        uint64_t error_packets_num = 0;
+
+        rte_ring* ring = nullptr;
+        rte_mempool* mempool = nullptr;
+
+        //查找rte_ring
+        string ring_tag = "rte_ring_" + to_string(m_WorkerConfig.CoreId);
+        ring = rte_ring_lookup(ring_tag.c_str());
+        if(ring == nullptr){
+            cout << "查找 " << ring_tag << " 失败!" << endl;
+            exit(-1);
+        }
+        //查找mempool
+        string mempool_tag = "mempool_" + to_string(m_WorkerConfig.CoreId);
+        mempool = rte_mempool_lookup(mempool_tag.c_str());
+        if(mempool == nullptr){
+            cout << "查找 " << mempool_tag << " 失败!" << endl;
+            exit(-1);
+        }
 
         //主循环，运行直到被告知停止
         while (!m_Stop)
         {
             uint32_t file_size = v.size(); // 剩余待读文件数量
             uint32_t current_num = 0;
-            pcpp::RawPacket raw_packet;
+            pcpp::RawPacket *raw_packet;
+            int i = 1;
             for (const string &s :v){
-                cout << "loading " << s << endl;
-                pcpp::PcapFileReaderDevice reader(s.c_str());
-                if(!reader.open()){
-                    read_pcap_map_.insert(make_pair(s, 1));
-                    cout << "文件 " << s << "打开失败"<<endl;
-                    continue;
-                }
-                gettimeofday(&start, nullptr);
-                stat(s.c_str(), &FileInfo);
-                cout << "开始读取File: " << s << "(" << ++current_num << "/" << file_size << ")" << endl;
-                while (true){
-                    if (!m_Stop && !reader.getNextPacket(raw_packet)){
-                        gettimeofday(&end, nullptr);
-                        float useTime = (end.tv_sec - start.tv_sec) + (double)(end.tv_usec - start.tv_usec)/1000000.0;
-                        cout << "耗费时间: " << useTime << "(s)" << " 文件大小: " << FileInfo.st_size /1024/1024 << "(MB)"
-                             << " 读取速度: " << FileInfo.st_size /1024/1024 / useTime << "(MB/s)" << endl;
+                if((i++ % m_WorkerConfig.ReadPcapCoreNum) == (coreId-2)){
+                    pcpp::PcapFileReaderDevice reader(s.c_str());
+                    if(!reader.open()){
                         read_pcap_map_.insert(make_pair(s, 1));
-                        m_Stats.total_number_ += FileInfo.st_size;
-
-//                        struct rte_eth_stats ethStats{};
-//                        if (0 == rte_eth_stats_get(m_WorkerConfig.SendPacketsPort, &ethStats)){
-//                            cout << "传输包数:" << (ethStats.opackets - success_packets_num) << " 发送失败:" << (ethStats.oerrors - error_packets_num) << endl;
-//                            cout << "成功率: " << ((double)(ethStats.obytes - m_Stats.send_success_number_) / (double)(FileInfo.st_size) ) * 100 << "% ";
-//                            //cout << "丢包率: " << ((double)(ethStats.oerrors - error_packets_num) / (double)((ethStats.opackets - success_packets_num) + (ethStats.oerrors - error_packets_num)) ) * 100 << "% ";
-//                            cout << "发送速度:" << (ethStats.obytes - m_Stats.send_success_number_)/1024/1024 / useTime << "MB/s" << endl;
-//                            m_Stats.send_success_number_ = ethStats.obytes;
-//                            success_packets_num = ethStats.opackets;
-//                            error_packets_num = ethStats.oerrors;
-//                        }
-                        break; // 收尾完成，退出
+                        cout << "文件 " << s << "打开失败"<<endl;
+                        continue;
                     }
-                    auto* packetStruct = new PacketStruct(raw_packet.getRawDataLen(),raw_packet.getRawData());
+                    gettimeofday(&start, nullptr);
+                    stat(s.c_str(), &FileInfo);
+                    cout << "ReadWorkerThread:"<< m_CoreId << " 开始读取File: " << s << "(" << ++current_num << "/" << file_size << ")" << endl;
+                    uint64_t index = 0;
+                    while (true){
+                        raw_packet = new pcpp::RawPacket();
+                        if (!m_Stop && !reader.getNextPacket(*raw_packet)){
+                            gettimeofday(&end, nullptr);
+                            float useTime = (end.tv_sec - start.tv_sec) + (double)(end.tv_usec - start.tv_usec)/1000000.0;
+                            cout << "耗费时间: " << useTime << "(s)" << " 文件大小: " << FileInfo.st_size /1024/1024 << "(MB)"
+                                 << " 读取速度: " << FileInfo.st_size /1024/1024 / useTime << "(MB/s)" << endl;
+                            read_pcap_map_.insert(make_pair(s, 1));
+                            m_Stats.total_number_ += FileInfo.st_size;
 
-
-                    //sendPacketsTo->sendPacket(raw_packet,0, true) ? m_Stats.sendSuccess_++ : m_Stats.sendError_++;
-                    m_Stats.PacketCount++;
-                }
-                if(m_Stop){
-                    reader.close();
-                    break;
+                            void *msg = nullptr;
+                            while (rte_mempool_get(mempool, &msg) < 0){
+                                cout << "无mempool可获取:m_CoreId:" << m_CoreId << endl;
+                                sleep(1);
+                            }
+                            auto * packetStruct = (PacketStruct*)msg;
+                            snprintf((char *)packetStruct->pcap_name, s.size()+1, "%s", s.c_str());
+                            packetStruct->index = ++index;
+                            packetStruct->coreId = coreId;
+                            packetStruct->packet_end = true;
+                            usleep(5);
+                            if (rte_ring_enqueue(ring, msg) < 0) {
+                                rte_mempool_put(mempool, msg);
+                            }
+                            break; // 收尾完成，退出
+                        }
+                        //auto* packetStruct = new PacketStruct(raw_packet.getRawDataLen(),raw_packet.getRawData());
+                        void *msg = nullptr;
+                        while (rte_mempool_get(mempool, &msg) < 0){
+                            cout << "无mempool可获取:m_CoreId:" << m_CoreId << endl;
+                            sleep(1);
+                        }
+                        auto * packetStruct = (PacketStruct*)msg;
+                        snprintf((char *)packetStruct->pcap_name, s.size()+1, "%s", s.c_str());
+                        packetStruct->index = ++index;
+                        packetStruct->coreId = coreId;
+                        packetStruct->packet_end = false;
+                        //cout <<" ReadWorkerThread:" << m_CoreId <<" from:"<< packetStruct->coreId << " pcap_name:" << packetStruct->pcap_name << " index:"<< packetStruct->index << endl;
+                        usleep(5);
+                        packetStruct->rawPacket = raw_packet;
+                        if (rte_ring_enqueue(ring, msg) < 0) {
+                            rte_mempool_put(mempool, msg);
+                        }
+                        //sendPacketsTo->sendPacket(raw_packet,0, true) ? m_Stats.sendSuccess_++ : m_Stats.sendError_++;
+                        //m_Stats.PacketCount++;
+                    }
+                    if(m_Stop){
+                        reader.close();
+                        break;
+                    }
                 }
             }
+            cout << "核心" << m_WorkerConfig.CoreId << "读包完成" << endl;
         }
 
         return true;
