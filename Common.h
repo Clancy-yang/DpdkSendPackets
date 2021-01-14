@@ -46,13 +46,15 @@ struct AppWorkerConfig
 	pcpp::DpdkDevice* SendPacketsTo;
     uint16_t SendPacketsPort = 0;
     //发送速度(Mbps)
-    uint16_t send_speed = 0;
+    uint16_t send_speed = 10000;
     //设备是否支持限速
     bool dev_speed_limit = true;
 	//读文件目录
 	string PcapFileDirPath;
 	//读文件列表
     string PcapFileListPath;
+    //发包是否启动buffer,启用后提速但可能会丢包
+    bool useTxBuffer = false;
 
 	AppWorkerConfig():
 	CoreId(MAX_NUM_OF_CORES+1),

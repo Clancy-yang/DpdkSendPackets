@@ -23,7 +23,7 @@ static struct option FilterTrafficOptions[] =
         {
                 {"s",  required_argument, 0, 's'},
                 {"pcap-dir-path",  required_argument, 0, 'a'},
-                {"pcap-list-path",  required_argument, 0, 'b'},
+                {"useTxBuffer",  no_argument, 0, 'b'},
                 {"speed",  required_argument, 0, 'p'},
                 {"list", optional_argument, 0, 'l'},
                 {"help", optional_argument, 0, 'h'},
@@ -61,14 +61,16 @@ int main(int argc, char* argv[]) {
     //DPDK发送端口
     int sendPacketsToPort = -1;
 
+    bool useTxBuffer = false;
+
     int optionIndex = 0;
     char opt = 0;
     string pcapDirPath,pcapListPath;
 
     //发送速度(Mbps)
-    uint16_t send_speed = 0;
+    uint16_t send_speed = 34463;
 
-    while((opt = getopt_long (argc, argv, "s:a:b:p:lh", FilterTrafficOptions, &optionIndex)) != -1)
+    while((opt = getopt_long (argc, argv, "s:a:p:blh", FilterTrafficOptions, &optionIndex)) != -1)
     {
         switch (opt)
         {
@@ -88,7 +90,7 @@ int main(int argc, char* argv[]) {
             }
             case 'b':
             {
-                pcapListPath = string(optarg);
+                useTxBuffer = true;
                 break;
             }
             case 'p':
@@ -155,6 +157,7 @@ int main(int argc, char* argv[]) {
     workerConfigArr[0].PcapFileDirPath = pcapDirPath;
     workerConfigArr[0].PcapFileListPath = pcapListPath;
     workerConfigArr[0].send_speed = send_speed;
+    workerConfigArr[0].useTxBuffer = useTxBuffer;
 
     rte_eth_dev_info dev_info{};
     rte_eth_dev_info_get(sendPacketsToPort,&dev_info);
@@ -177,12 +180,13 @@ int main(int argc, char* argv[]) {
     struct rte_eth_dev *dev;
     dev = &rte_eth_devices[sendPacketsToPort];
     if(dev->data->dev_link.link_speed == 0){
-        dev->data->dev_link.link_speed = 10000;
+        dev->data->dev_link.link_speed = 10240;
+        cout << "set link_speed = "<< dev->data->dev_link.link_speed << endl;
     }else{
-        cout << "link_speed = "<< dev->data->dev_link.link_speed << endl;
+        cout << "get link_speed = "<< dev->data->dev_link.link_speed << endl;
     }
 
-    if(send_speed != 0) {
+    if(send_speed != 34463) {
         int limit_stat = rte_eth_set_queue_rate_limit(sendPacketsToPort, 0, send_speed);
         if (limit_stat != 0) {
             switch (limit_stat) {
@@ -204,6 +208,8 @@ int main(int argc, char* argv[]) {
             }
             cout << "采用 usleep 模式,请手动调节限速大小" << endl;
             workerConfigArr[0].dev_speed_limit = false;
+        }else{
+            cout << "DPDK限速中:当前速度:" << send_speed << "Mbps" << endl;
         }
     }
 
@@ -308,6 +314,7 @@ void printUsage()
            "    -s                           : 绑定dpdk发包端口\n"
            "    -a                           : pcap包所在目录\n"
            "    -p                           : 发送速度(Mb/s)\n"
+           "    -b                           : 发包使用TxBuffer(提速但可能丢包)\n"
            //"    -b                           : pcap包的list文件\n"
            "------\n"
            "\n流程:\n\n"

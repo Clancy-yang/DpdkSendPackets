@@ -221,8 +221,8 @@ public:
                 while (true){
                     if (!m_Stop && !reader.getNextPacket(raw_packet)){
                         //预计总用时 us (FileInfo.st_size / m_WorkerConfig.send_speed * 1024 *1024) * 1000 * 1000
-                        uint64_t total_use_time =  ((success_payload_num + error_payload_num * 1000 * 1000) / (m_WorkerConfig.send_speed * 1024 *1024));
-                        cout << "预计用时:" << total_use_time << "us" << endl;
+                        uint64_t total_use_time = ((success_payload_num + error_payload_num) / (m_WorkerConfig.send_speed * 1.024 * 1.024));
+                        cout << "预计用时:" << total_use_time << "us 是否启动TxBuffer:" << m_WorkerConfig.useTxBuffer<< endl;
 
                         gettimeofday(&end, nullptr);
                         //实际使用时间
@@ -266,13 +266,32 @@ public:
                         m_Stats.total_number_ += (success_payload_num + error_payload_num);
                         break; // 收尾完成，退出
                     }
-                    if(sendPacketsTo->sendPacket(raw_packet,0,true)){
-                        success_payload_num += raw_packet.getRawDataLen();
-                        m_Stats.sendSuccess_++;
+                    //降低限速时丢包问题(仅在不使用useTxBuffer时开启)
+                    if(!m_WorkerConfig.useTxBuffer){
+                        int index = 0;
+                        while (!sendPacketsTo->sendPacket(raw_packet,0)){
+                            usleep(20);
+                            if(++index == 3){
+                                //cout << "lose packet" << endl;
+                                error_payload_num += raw_packet.getRawDataLen();
+                                m_Stats.sendError_++;
+                                break;
+                            }
+                        }
+                        if(index != 3){
+                            success_payload_num += raw_packet.getRawDataLen();
+                            m_Stats.sendSuccess_++;
+                        }
                     }else{
-                        error_payload_num += raw_packet.getRawDataLen();
-                        m_Stats.sendError_++;
+                        if(sendPacketsTo->sendPacket(raw_packet,0,m_WorkerConfig.useTxBuffer)){
+                            success_payload_num += raw_packet.getRawDataLen();
+                            m_Stats.sendSuccess_++;
+                        }else{
+                            error_payload_num += raw_packet.getRawDataLen();
+                            m_Stats.sendError_++;
+                        }
                     }
+
                     m_Stats.PacketCount++;
                 }
                 if(m_Stop){
