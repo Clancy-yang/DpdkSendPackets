@@ -264,6 +264,7 @@ public:
                             m_Stats.send_success_number_ = ethStats.obytes;
                         }
                         m_Stats.total_number_ += (success_payload_num + error_payload_num);
+                        reader.close();
                         break; // 收尾完成，退出
                     }
                     //降低限速时丢包问题(仅在不使用useTxBuffer时开启)
