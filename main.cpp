@@ -134,6 +134,9 @@ int main(int argc, char* argv[]) {
     } else
         cout << "找到" << pcapFileNameVecter.size() << "个文件" << endl;
 
+//    for(const auto& str:pcapFileNameVecter)
+//        cout << str <<endl;
+
     //为机器上可用的所有核心创建核心掩码
 //    CoreMask coreMaskToUse = getCoreMaskForAllMachineCores();
 
@@ -180,34 +183,20 @@ int main(int argc, char* argv[]) {
     for(int i = 0; i < readPcapCoreNum; ++i){
         //创建rte_ring
         string ring_tag = "rte_ring_" + to_string(i);
-        if(rte_ring_create(ring_tag.c_str(),262144,(uint)rte_socket_id(),0) == nullptr){
+        if(rte_ring_create(ring_tag.c_str(),262144,(uint)rte_socket_id(),RING_F_SP_ENQ | RING_F_SC_DEQ) == nullptr){
             cout << "创建 " << ring_tag << " 失败!" << endl;
             exit(-1);
         }
 
         //创建mempool
         string mempool_tag = "mempool_" + to_string(i);
-        if(rte_mempool_create(mempool_tag.c_str(), 65536, (2048 + sizeof(struct rte_mbuf) + RTE_PKTMBUF_HEADROOM), 32, sizeof(struct rte_pktmbuf_pool_private),
+        if(rte_mempool_create(mempool_tag.c_str(), 65536 * 2, (2048 + sizeof(struct rte_mbuf) + RTE_PKTMBUF_HEADROOM), 32, sizeof(struct rte_pktmbuf_pool_private),
                               rte_pktmbuf_pool_init, nullptr, rte_pktmbuf_init, nullptr, (uint)rte_socket_id(),
                               0) == nullptr){
             cout << "创建 " << mempool_tag << " 失败!" << endl;
             exit(-1);
         }
     }
-
-//    struct rte_ring *ring = rte_ring_create("message_ring",262144, (uint)rte_socket_id(), 0);
-//    struct rte_mempool *message_pool = rte_mempool_create("message_pool", 65536,2048 + sizeof(struct rte_mbuf) + RTE_PKTMBUF_HEADROOM, 32, 0,
-//            NULL, NULL, NULL, NULL,rte_socket_id(), 0);
-//
-//    if(ring == nullptr || message_pool == nullptr){
-//        cout << "ring 或 mempool 创建失败 " << endl;
-//        exit(-1);
-//    }
-
-    //根据pcap所在文件夹读取pcap
-//    vector<string> pcap_file_name_vector;
-//    FindDirFile(pcapDirPath.c_str(), pcap_file_name_vector);
-
 
     //为每个核心创建工作线程
     vector<DpdkWorkerThread*> workerThreadVec;
@@ -220,10 +209,12 @@ int main(int argc, char* argv[]) {
 
     //读包工作线程配置
     for(int i = 0; i < readPcapCoreNum; ++i){
-        ReadWorkConfig readWorkConfig(i,&pcapFileNameVecter);
-        readWorkConfig.ReadPcapCoreNum = readPcapCoreNum;
-        auto* readWorkerThread = new ReadWorkerThread(readWorkConfig);
+        auto readWorkConfig = new ReadWorkConfig(i,readPcapCoreNum);
+        //ReadWorkConfig readWorkConfig(i,readPcapCoreNum);
+        readWorkConfig->pcapFileNameVecter = pcapFileNameVecter;
+        auto readWorkerThread = new ReadWorkerThread(*readWorkConfig);
         workerThreadVec.push_back(readWorkerThread);
+        usleep(10);
     }
     cout << "workerThreadVec:" << workerThreadVec.size() << " coreMaskToUse:" << coreMaskToUse << endl;
     //启动所有工作线程
@@ -289,13 +280,18 @@ void onApplicationInterrupted(void* cookie)
     TablePrinter printer(columnNames, columnWidths);
     //显示每个工作线程的最终状态以及所有线程和空闲工作线程内存的总和
     PacketStats aggregatedStats;
-    for (auto & iter : *args->workerThreadsVector)
-    {
-        auto* thread = (AppWorkerThread*)iter;
-        PacketStats threadStats = thread->getStats();
-        aggregatedStats.collectStats(threadStats);
-        delete thread;
-    }
+    auto* thread = (SendWorkerThread*)(*(args->workerThreadsVector))[0];
+    PacketStats threadStats = thread->getStats();
+    aggregatedStats.collectStats(threadStats);
+    delete thread;
+
+//    for (auto & iter : *args->workerThreadsVector)
+//    {
+//        auto* thread = (SendWorkerThread*)iter;
+//        PacketStats threadStats = thread->getStats();
+//        aggregatedStats.collectStats(threadStats);
+//        delete thread;
+//    }
 
     printer.printRow(aggregatedStats.getStatValuesAsString("|"), '|');
 

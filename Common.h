@@ -38,11 +38,11 @@ struct FileListStruct{
 };
 
 struct PacketStruct{
-    uint64_t coreId = 0;
+    uint64_t readCoreId = 0;
     uint64_t index = 0;
-    bool packet_end = false;
-    char pcap_name[128]{};
-    pcpp::RawPacket* rawPacket = nullptr;
+    char pcapName[128]{};
+    vector<pcpp::RawPacket*> * rawPacketVector = nullptr;
+    pcpp::RawPacketVector * rawPacketVector_ = nullptr;
 };
 
 
@@ -94,17 +94,17 @@ struct ReadWorkConfig{
 //核心id
     uint32_t CoreId;
     //文件名称列表
-    vector<string> *pcapFileNameVecter = nullptr;
+    vector<string> pcapFileNameVecter;
     //读pcap包核心数
-    uint16_t ReadPcapCoreNum = 0;
+    uint16_t readPcapCoreNum = 0;
     //构造
-    ReadWorkConfig():
+    explicit ReadWorkConfig():
     CoreId(MAX_NUM_OF_CORES+1)
-    {};
-    ReadWorkConfig(uint32_t CoreId, vector<string> *pcapFileNameVecter):
+    {}
+    ReadWorkConfig(const uint32_t CoreId,uint16_t readPcapCoreNum):
     CoreId(CoreId),
-    pcapFileNameVecter(pcapFileNameVecter)
-    {};
+    readPcapCoreNum(readPcapCoreNum)
+    {}
 };
 
 
@@ -116,40 +116,65 @@ struct PacketStats
 public:
 	uint8_t WorkerId;
 
-    uint64_t PacketCount = 0;
-    uint64_t sendSuccess_ = 0;//包数
-	uint64_t sendError_ = 0;
-	uint64_t send_success_number_ = 0;//数据量
-	uint64_t total_number_ = 0;
+	// 根据读取信息统计
+	uint64_t sendAllPacketNum = 0;      // 发送总包数
+	uint64_t sendAllDataNum = 0;        // 发送总数据量
+	uint64_t sendSuccessPacketNum = 0;  // 发包成功数
+	uint64_t sendErrorPacketNum = 0;    // 发包失败数
+	uint64_t sendSuccessDataNum = 0;    // 发包成功数据量
+	uint64_t sendErrorDataNum = 0;      // 发包失败数据量
 
-	PacketStats() : WorkerId(MAX_NUM_OF_CORES+1), PacketCount(0){}
+	// 根据网卡信息统计
+	uint64_t sendPacketCount = 0;       // 传输包数
+	uint64_t sendDataCount = 0;         // 传输数据量
 
+	// ring和mempool信息
+	uint64_t ringSendPacketNum = 0;     // 通过ring发送的包数
+	uint64_t ringSendDataNum = 0;       // 通过ring发送的数据量
+	uint64_t ringReceivePacketNum = 0;  // 通过ring接收的包数
+	uint64_t ringReceiveDataNum = 0;    // 通过ring接收的数据量
+	uint64_t ringFullLosePacketNum = 0; // 因ring满导致丢包数
+	uint64_t ringFullLoseDataNum = 0;   // 因ring满导致丢失数据量
+	uint64_t mempoolFullLosePacketNum = 0;  // 因mempool满导致丢失包数
+	uint64_t mempoolFullLoseDataNum = 0;    // 因mempool满导致丢失数据量
 
+	PacketStats() : WorkerId(MAX_NUM_OF_CORES+1){}
 
 	void collectStats(PacketStats& stats)
 	{
-		PacketCount += stats.PacketCount;
-        sendSuccess_ += stats.sendSuccess_;
-        sendError_ += stats.sendError_;
-        send_success_number_ += stats.send_success_number_;
-        total_number_ += stats.total_number_;
+        sendAllPacketNum += stats.sendAllPacketNum;
+        sendAllDataNum += stats.sendAllDataNum;
+
+        sendSuccessPacketNum += stats.sendSuccessPacketNum;
+        sendErrorPacketNum += stats.sendErrorPacketNum;
+        sendSuccessDataNum += stats.sendSuccessDataNum;
+        sendErrorDataNum += stats.sendErrorDataNum;
+
+        sendPacketCount += stats.sendPacketCount;
+        sendDataCount += stats.sendDataCount;
 	}
 
-	//void clear() { WorkerId = MAX_NUM_OF_CORES+1; PacketCount = 0; EthCount = 0; ArpCount = 0; Ip4Count = 0; Ip6Count = 0; TcpCount = 0; UdpCount = 0; HttpCount = 0; MatchedTcpFlows = 0; MatchedUdpFlows = 0; MatchedPackets = 0; }
+	void clear() {
+	    WorkerId = MAX_NUM_OF_CORES+1;
+        sendAllPacketNum = 0;
+        sendAllDataNum = 0;
+        sendSuccessPacketNum = 0;
+        sendErrorPacketNum = 0;
+        sendSuccessDataNum = 0;
+        sendErrorDataNum = 0;
+        sendPacketCount = 0;
+        sendDataCount = 0;
+	}
 
 	[[nodiscard]] std::string getStatValuesAsString(const std::string& delimiter) const
 	{
 		std::stringstream values;
-//		if (WorkerId == MAX_NUM_OF_CORES+1)
-//			values << "Total" << delimiter;
-//		else
-//			values << (int)WorkerId << delimiter;
-		values << PacketCount << delimiter;
-        values << sendSuccess_ << delimiter;
-        values << sendError_ << delimiter;
-        values << (double)total_number_ / 1024 / 1024 / 1024 << delimiter;
-        values << (double)send_success_number_ / 1024 / 1024 / 1024 << delimiter;
-        values << ((double)send_success_number_ / (double)total_number_) * 100 << delimiter;
+		values << sendAllPacketNum << delimiter;
+        values << sendSuccessPacketNum << delimiter;
+        values << sendErrorPacketNum << delimiter;
+        values << (double)sendAllDataNum / 1024 / 1024 / 1024 << delimiter;
+        values << (double)sendDataCount / 1024 / 1024 / 1024 << delimiter;
+        values << ((double)sendDataCount / (double)sendAllDataNum) * 100 << delimiter;
 
 		return values.str();
 	}
@@ -159,18 +184,18 @@ public:
 		columnNames.clear();
 		columnWidths.clear();
 
-		columnNames.emplace_back("  总发送数据包数  ");
-        columnNames.emplace_back(" 发送成功数据包数 ");
-        columnNames.emplace_back(" 发送失败数据包数 ");
-        columnNames.emplace_back("全部数据量(GB)");
-        columnNames.emplace_back("成功数据量(GB)");
-        columnNames.emplace_back(" 成功率(%) ");
+		columnNames.emplace_back("全部发送数据包数");
+        columnNames.emplace_back("发送成功数据包数");
+        columnNames.emplace_back("发送失败数据包数");
+        columnNames.emplace_back("读取数据量(GB)");
+        columnNames.emplace_back("传输数据量(GB)");
+        columnNames.emplace_back("成功率(%)");
 
-		columnWidths.push_back(18);
-        columnWidths.push_back(18);
-        columnWidths.push_back(18);
+		columnWidths.push_back(16);
+        columnWidths.push_back(16);
+        columnWidths.push_back(16);
         columnWidths.push_back(14);
         columnWidths.push_back(14);
-        columnWidths.push_back(11);
+        columnWidths.push_back(9);
 	}
 };
