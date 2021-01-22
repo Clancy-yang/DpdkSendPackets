@@ -182,12 +182,8 @@ public:
 
 		//统计信息
         vector<string> v;
-        struct timeval read_start{}, read_end{},send_start{}, send_end{};
-
+        struct timeval read_start{}, read_end{};
         struct stat FileInfo{};
-        uint64_t packet_count = 0;
-        struct rte_eth_stats ethStats{};
-
         usleep(m_Stats.WorkerId);
         cout << "核心:" << m_Stats.WorkerId << " 启动" << endl;
 
@@ -218,6 +214,7 @@ public:
             for (const string &s :v){
                 //判断当前包是否归属于当前线程处理
                 if(current_num++ % m_WorkerConfig.readCoreNum != m_Stats.WorkerId) continue;
+                //开始计时
                 gettimeofday(&read_start, nullptr);
                 //开始读取数据
                 pcpp::PcapFileReaderDevice reader(s.c_str());
@@ -228,30 +225,37 @@ public:
                 }
                 stat(s.c_str(), &FileInfo);
 
-                //包负载总数
-                uint64_t success_payload_num = 0;
-                uint64_t error_payload_num = 0;
+                //包总数
+                uint64_t total_packet_num = 0;
 
-                //临时存储包的数组
-                vector<pcpp::RawPacket*> raw_packet_vector;
+                //RawPacketVector的数组
                 vector<pcpp::RawPacketVector*> raw_packet_vector_vector;
-                while (true){
 
-                    pcpp::RawPacketVector *rawPacketVector = new pcpp::RawPacketVector();
-                    if(!m_Stop && reader.getNextPackets(*rawPacketVector,400) <= 0){
+                //在未收到终止信号或未break时一直循环
+                while (!m_Stop){
+                    //新建RawPacketVector对象
+                    auto *rawPacketVector = new pcpp::RawPacketVector();
+                    //根据pcpp文档表示<64时直接发送>400时将有0.2秒的内置睡眠时间来清理TX描述符
+                    uint64_t tmp = reader.getNextPackets(*rawPacketVector,400);
+                    total_packet_num += tmp;
+
+                    //当返回值小于0时读包结束
+                    if(tmp <= 0){
                         //读取完毕：统计读包用时
                         gettimeofday(&read_end, nullptr);
-                        cout << "================ loading ================" << endl;
-                        //cout << " packets_num: " << packets_num << endl;
-                        cout << "核心:"<<m_Stats.WorkerId<<" 读取File: " << s << "(" << current_num << "/" << file_size << ")" << endl;
-                        //预计总用时 us (FileInfo.st_size / m_WorkerConfig.send_speed * 1024 *1024) * 1000 * 1000
-//                        uint64_t total_use_time = ((success_payload_num + error_payload_num) / (m_WorkerConfig.send_speed * 1.024 * 1.024));
-//                        cout << "预计用时:" << total_use_time << "us 是否启动TxBuffer:" << m_WorkerConfig.useTxBuffer<< endl;
-                        //实际使用时间
-                        float read_pcap_use_time = (read_end.tv_sec - read_start.tv_sec) + (double)(read_end.tv_usec - read_start.tv_usec)/1000000.0;
-                        cout << "耗费时间: " << read_pcap_use_time << "(s)" << " 文件大小: " << FileInfo.st_size/1024/1024 << "(MB)"
-                             << " 读取速度: " << FileInfo.st_size/1024/1024 / read_pcap_use_time << "(MB/s)" << endl;
-                        cout << "当前令牌持有者:" << *(m_WorkerConfig.token) << endl;
+                        //统计信息
+                        *(m_WorkerConfig.io_delay) = (*(m_WorkerConfig.token) == m_Stats.WorkerId);
+                        m_Stats.read_packet_num += total_packet_num;
+                        m_Stats.read_data_num += FileInfo.st_size;
+                        if(m_WorkerConfig.showReadInfo){
+                            cout << "================ loading ================  "<<(*(m_WorkerConfig.token) == m_Stats.WorkerId ? "等待IO":" ") << endl;
+                            cout << "核心:" << m_Stats.WorkerId << " 读取File: " << s << "(" << current_num << "/" << file_size << ")" << endl;
+                            float read_pcap_use_time = (read_end.tv_sec - read_start.tv_sec) + (double)(read_end.tv_usec - read_start.tv_usec)/1000000.0;
+                            cout << "耗费时间: " << read_pcap_use_time << "(s)\t";
+                            cout << "读取包数: " << total_packet_num << '\t';
+                            cout << "文件大小: " << FileInfo.st_size/1024/1024 << "(MB)\t";
+                            cout << "读取速度: " << FileInfo.st_size/1024/1024 / read_pcap_use_time << "(MB/s)" << endl;
+                        }
                         read_pcap_map_.insert(make_pair(s, 1));
 
                         //本线程读取完毕,等待其他线程交出令牌
@@ -259,8 +263,7 @@ public:
                             usleep(1);
                         }
 
-                        cout << "================ Sending ================" << endl;
-                        cout << "开始发包:当前令牌持有者:" << *(m_WorkerConfig.token) << endl;
+                        //本线程获取令牌,开始发包
                         for(auto it:raw_packet_vector_vector){
                             if(!m_Stop)
                                 sendPacketsTo->sendPackets(*it);
@@ -268,206 +271,29 @@ public:
                             delete it;
                             it = nullptr;
                         }
-                        cout << "发包结束:发包令牌持有者:" << *(m_WorkerConfig.token) << endl;
-                        //本线程结束,交出令牌
+                        raw_packet_vector_vector.clear();
+                        //发包结束,统计信息
+
+                        //本线程发包结束,交出令牌
                         ++*(m_WorkerConfig.token) %= m_WorkerConfig.readCoreNum;
                         reader.close();
                         break;
                     }
 
+                    //将rawPacketVector放入vector
                     raw_packet_vector_vector.push_back(rawPacketVector);
-
-                    if(m_Stop){
-                        for(auto it:raw_packet_vector_vector){
-                            it->clear();
-                            delete it;
-                            it = nullptr;
-                        }
-                        break;
-                    }
-
-
-
-
-//                    //pcpp::MBufRawPacketVector mBufRawPacketVector;
-//                    pcpp::RawPacketVector rawPacketVector;
-//                    uint64_t packets_num = reader.getNextPackets(rawPacketVector);
-//                    if(!m_Stop){
-//                        //读取完毕：统计读包用时
-//                        gettimeofday(&read_end, nullptr);
-//                        cout << "================ loading ================" << endl;
-//                        cout << " packets_num: " << packets_num << endl;
-//                        cout << "核心:"<<m_Stats.WorkerId<<" 读取File: " << s << "(" << current_num << "/" << file_size << ")" << endl;
-//                        //预计总用时 us (FileInfo.st_size / m_WorkerConfig.send_speed * 1024 *1024) * 1000 * 1000
-////                        uint64_t total_use_time = ((success_payload_num + error_payload_num) / (m_WorkerConfig.send_speed * 1.024 * 1.024));
-////                        cout << "预计用时:" << total_use_time << "us 是否启动TxBuffer:" << m_WorkerConfig.useTxBuffer<< endl;
-//                        //实际使用时间
-//                        float read_pcap_use_time = (read_end.tv_sec - read_start.tv_sec) + (double)(read_end.tv_usec - read_start.tv_usec)/1000000.0;
-//                        cout << "耗费时间: " << read_pcap_use_time << "(s)" << " 文件大小: " << FileInfo.st_size/1024/1024 << "(MB)"
-//                             << " 读取速度: " << FileInfo.st_size/1024/1024 / read_pcap_use_time << "(MB/s)" << endl;
-//                        cout << "当前令牌持有者:" << *(m_WorkerConfig.token) << endl;
-//                        read_pcap_map_.insert(make_pair(s, 1));
-//
-//                        //本线程读取完毕,等待其他线程交出令牌
-//                        while(!m_Stop && *(m_WorkerConfig.token) != m_Stats.WorkerId) {
-//                            usleep(1);
-//                        }
-//
-//                        cout << "================ Sending ================" << endl;
-//                        cout << "开始发包:当前令牌持有者:" << *(m_WorkerConfig.token) << endl;
-//                        int i = sendPacketsTo->sendPackets(rawPacketVector);
-//                        cout << "发送" << i << "个包" << endl;
-//                        cout << "发包结束:发包令牌持有者:" << *(m_WorkerConfig.token) << endl;
-//                        //本线程结束,交出令牌
-//                        ++*(m_WorkerConfig.token) %= m_WorkerConfig.readCoreNum;
-//                        reader.close();
-//                        break;
-//                    }
-
-
-
-
-
-
-//                    pcpp::RawPacket *raw_packet = new pcpp::RawPacket();
-//                    if (!m_Stop && !reader.getNextPacket(*raw_packet)){
-//                        //读取完毕：统计读包用时
-//                        gettimeofday(&read_end, nullptr);
-//                        cout << "================ loading ================" << endl;
-//                        cout << "核心:"<<m_Stats.WorkerId<<" 读取File: " << s << "(" << current_num << "/" << file_size << ")" << endl;
-//                        //预计总用时 us (FileInfo.st_size / m_WorkerConfig.send_speed * 1024 *1024) * 1000 * 1000
-////                        uint64_t total_use_time = ((success_payload_num + error_payload_num) / (m_WorkerConfig.send_speed * 1.024 * 1.024));
-////                        cout << "预计用时:" << total_use_time << "us 是否启动TxBuffer:" << m_WorkerConfig.useTxBuffer<< endl;
-//                        //实际使用时间
-//                        float read_pcap_use_time = (read_end.tv_sec - read_start.tv_sec) + (double)(read_end.tv_usec - read_start.tv_usec)/1000000.0;
-//                        cout << "耗费时间: " << read_pcap_use_time << "(s)" << " 文件大小: " << FileInfo.st_size/1024/1024 << "(MB)"
-//                             << " 读取速度: " << FileInfo.st_size/1024/1024 / read_pcap_use_time << "(MB/s)" << endl;
-//                        cout << "当前令牌持有者:" << *(m_WorkerConfig.token) << endl;
-//                        read_pcap_map_.insert(make_pair(s, 1));
-//
-//                        //本线程读取完毕,等待其他线程交出令牌
-//                        while(!m_Stop && *(m_WorkerConfig.token) != m_Stats.WorkerId) {
-//                            usleep(1);
-//                        }
-//
-//                        if(!raw_packet_vector.empty()){
-//                            cout << "================ Sending ================" << endl;
-//                            cout << "开始发包:当前令牌持有者:" << *(m_WorkerConfig.token) << endl;
-////                            gettimeofday(&send_start, nullptr);
-//                            //获取令牌后先发送vector中的包
-//                            for(auto rawPacket:raw_packet_vector){
-//                                if(!m_Stop){
-//                                    //采用buffer时统计不准确默认全部发送成功
-//                                    sendPacketsTo->sendPacket(*rawPacket,*(m_WorkerConfig.now_open_tx_queues), true);
-//                                    m_Stats.sendSuccess_++;
-//
-////                                    //开启
-////                                    if(!m_WorkerConfig.useTxBuffer){
-////                                        //降低限速时丢包问题(仅在不使用useTxBuffer时开启)
-////                                        int index = 0;
-////                                        while (!sendPacketsTo->sendPacket(*rawPacket,0)){
-////                                            usleep(5);
-////                                            if(++index == 3){
-////                                                error_payload_num += rawPacket->getRawDataLen();
-////                                                m_Stats.sendError_++;
-////                                                break;
-////                                            }
-////                                        }
-////                                        if(index != 3){
-////                                            success_payload_num += rawPacket->getRawDataLen();
-////                                            m_Stats.sendSuccess_++;
-////                                        }
-////                                    }else{
-////                                        //采用buffer时统计不准确默认全部发送成功
-////                                        sendPacketsTo->sendPacket(*rawPacket,0, true);
-////                                        //success_payload_num += rawPacket->getRawDataLen();
-////                                        m_Stats.sendSuccess_++;
-////                                    }
-//                                }
-//                                delete rawPacket;
-//                                rawPacket = nullptr;
-//
-//                                m_Stats.PacketCount++;
-//                            }
-//                            raw_packet_vector.clear();
-////                            gettimeofday(&send_end, nullptr);
-//                        }
-//
-//                        //m_Stats.total_number_ += FileInfo.st_size;
-//
-////                        //设备是否支持限速 不支持则采用 usleep模式
-////                        if(!m_WorkerConfig.dev_speed_limit){
-////                            //预计睡眠时间 = 预计总用时 - 实际用时
-////                            int64_t sleep_time = total_use_time - uint64_t(true_use_time * 1000 * 1000);
-////                            cout << "睡眠时间:" << sleep_time << "us 实际用时:" << uint64_t(true_use_time * 1000 * 1000) << "us" << endl;
-////                            if(sleep_time > 0)
-////                                usleep(sleep_time);
-////
-////                            gettimeofday(&end, nullptr);
-////                        }
-//
-//                        //struct rte_eth_stats ethStats{};
-////                        if (0 == rte_eth_stats_get(m_WorkerConfig.SendPacketsPort, &ethStats)){
-////                            float send_use_time = (send_end.tv_sec - send_start.tv_sec) + (double)(send_end.tv_usec - send_start.tv_usec)/1000000.0;
-////                            float idle_time = (send_start.tv_sec - read_end.tv_sec) + (double)(send_start.tv_usec - read_end.tv_usec)/1000000.0;
-////                            float total_use_time = (send_end.tv_sec - read_start.tv_sec) + (double)(send_end.tv_usec - read_start.tv_usec)/1000000.0;
-////                            cout << "================ Sending ================" << endl;
-////                            cout << "当前发包核心:" << m_Stats.WorkerId << " 下一个发包核心:" << (m_Stats.WorkerId+1)%m_WorkerConfig.readCoreNum << endl;
-////                            cout << "读包用时: " << read_pcap_use_time << "(s) ";
-////                            cout << " 发送用时: " << send_use_time << "(s) ";
-////                            cout << " 空闲时间: " << idle_time << "(s) ";
-////                            cout << " 总时间: " << total_use_time << "(s) " << endl;
-////
-////                            cout << "网卡信息:" << endl;
-////                            cout << "传输包数:" << (ethStats.opackets - *(m_WorkerConfig.success_packets_num));
-////                            cout << " 传输数据:" << (double)(ethStats.obytes - *(m_WorkerConfig.send_success_number))/1024/1024 << "(MB)" << endl;
-////
-////                            cout << "统计信息:" << endl;
-////                            cout << "读取包数:" << (m_Stats.PacketCount - packet_count);
-////                            cout << " 负载数据:" << (double)(success_payload_num + error_payload_num)/1024/1024 << "(MB)" << endl;
-////
-////                            cout << "发送成功:" << (double)(success_payload_num)/1024/1024 << "(MB) 发送失败:" << (double)(error_payload_num)/1024/1024 << "(MB)" << endl;
-////                            cout << "成功率: " << ((double)(success_payload_num) / (double)(success_payload_num + error_payload_num) ) * 100 << "% ";
-////                            cout << "当前限速状态:"<< (m_WorkerConfig.dev_speed_limit ? "是":"否") << " 限速:" << m_WorkerConfig.send_speed << endl;
-////                            cout << "发送速度:" << (double)(success_payload_num + error_payload_num)/1024/128 / send_use_time << "(Mb/s) ";
-////                            cout << "传输速度:" << (double)(ethStats.obytes - *(m_WorkerConfig.send_success_number))/1024/128 / send_use_time << "(Mb/s) ";
-////                            cout << "平均速度:" << (double)(ethStats.obytes - *(m_WorkerConfig.send_success_number))/1024/128 / total_use_time << "(Mb/s)" << endl;
-////
-////                            m_Stats.send_success_number_ += (ethStats.obytes - *(m_WorkerConfig.send_success_number));
-////                            packet_count = m_Stats.PacketCount;
-////                            *(m_WorkerConfig.success_packets_num) = ethStats.opackets;
-////                            *(m_WorkerConfig.send_success_number) = ethStats.obytes;
-////                        }
-//                        m_Stats.total_number_ += (success_payload_num + error_payload_num);
-//                        reader.close();
-//
-//                        cout << "发包结束:发包令牌持有者:" << *(m_WorkerConfig.token) << endl;
-//                        //本线程结束,交出令牌
-//                        ++*(m_WorkerConfig.token) %= m_WorkerConfig.readCoreNum;
-//                        ++*(m_WorkerConfig.now_open_tx_queues) %= m_WorkerConfig.open_tx_queues;
-//                        break; // 收尾完成，退出
-//                    }
-
-//                    raw_packet_vector.push_back(raw_packet);
-
-                    //收到终止信号,停止读包,释放内存,跳出循环
-//                    if(m_Stop){
-//                        for(auto rawPacket:raw_packet_vector){
-//                            delete rawPacket;
-//                            rawPacket = nullptr;
-//                        }
-//                        raw_packet_vector.clear();
-//                        break;
-//                    }
-
-
-
                 }
 
                 //收到终止信号
                 if(m_Stop){
+                    for(auto it:raw_packet_vector_vector){
+                        it->clear();
+                        delete it;
+                        it = nullptr;
+                    }
+                    raw_packet_vector_vector.clear();
                     reader.close();
-                    break;
+                    return true;
                 }
             }
 

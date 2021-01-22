@@ -26,6 +26,7 @@ static struct option FilterTrafficOptions[] =
                 {"pcap-dir-path2",  required_argument, 0, 'd'},
                 {"useTxBuffer",  no_argument, 0, 'b'},
                 {"read-core-num",  required_argument, 0, 'c'},
+                {"read-info",  no_argument, 0, 'r'},
                 {"speed",  required_argument, 0, 'p'},
                 {"list", optional_argument, 0, 'l'},
                 {"help", optional_argument, 0, 'h'},
@@ -55,6 +56,9 @@ void onApplicationInterrupted(void* cookie);
 
 void printUsage();
 
+//指定调用的核心(从哪到哪)
+CoreMask GenCoreNums(uint16_t start, uint16_t end);
+
 int main(int argc, char* argv[]) {
     //展示基本信息
     AppName::init(argc, argv);
@@ -64,6 +68,7 @@ int main(int argc, char* argv[]) {
     int sendPacketsToPort = -1;
 
     bool useTxBuffer = false;
+    bool showReadInfo = false;
     uint16_t readCoreNum = 1;
 
     int optionIndex = 0;
@@ -75,7 +80,7 @@ int main(int argc, char* argv[]) {
     uint16_t send_speed = 0;
     bool dev_speed_limit = false;
 
-    while((opt = getopt_long (argc, argv, "s:a:d:c:p:blh", FilterTrafficOptions, &optionIndex)) != -1)
+    while((opt = getopt_long (argc, argv, "s:a:d:c:p:blhr", FilterTrafficOptions, &optionIndex)) != -1)
     {
         switch (opt)
         {
@@ -101,6 +106,11 @@ int main(int argc, char* argv[]) {
             case 'b':
             {
                 useTxBuffer = true;
+                break;
+            }
+            case 'r':
+            {
+                showReadInfo = true;
                 break;
             }
             case 'c':
@@ -138,13 +148,17 @@ int main(int argc, char* argv[]) {
     }
 
     //为机器上可用的所有核心创建核心掩码
-    CoreMask coreMaskToUse = getCoreMaskForAllMachineCores();
+    //CoreMask coreMaskToUse = getCoreMaskForAllMachineCores();
 
     //缓冲池大小
     uint32_t mBufPoolSize = DEFAULT_MBUF_POOL_SIZE;
 
     //从核心遮罩中提取核心向量
     vector<SystemCore> coresToUse;
+    //核心数 = 主程序 + 读发包线程
+    uint16_t allUseCoreNum = 1 + readCoreNum;
+    //为机器上可用的指定核心创建核心掩码
+    CoreMask coreMaskToUse = GenCoreNums(0,allUseCoreNum);
     createCoreVectorFromCoreMask(coreMaskToUse, coresToUse);
 
     //至少需要2个核心才能启动-1个管理核心+ 1个（或更多）辅助线程
@@ -177,6 +191,7 @@ int main(int argc, char* argv[]) {
     uint16_t token = 0;
     uint64_t success_packets_num = 0;
     uint64_t send_success_number = 0;
+    bool io_delay = false;
     //工作线程配置结构体数组 每个核心绑定一个工作线程配置结构体
     AppWorkerConfig workerConfigArr[coresToUse.size()];
     if(readCoreNum > coresToUse.size()){
@@ -199,6 +214,8 @@ int main(int argc, char* argv[]) {
         workerConfigArr[i].send_success_number = &send_success_number;
         workerConfigArr[i].open_tx_queues = open_tx_queues;
         workerConfigArr[i].now_open_tx_queues = &now_open_tx_queues;
+        workerConfigArr[i].showReadInfo = showReadInfo;
+        workerConfigArr[i].io_delay = &io_delay;
     }
 
     //是否开启限速模式
@@ -257,12 +274,10 @@ int main(int argc, char* argv[]) {
 
     //为每个核心创建工作线程
     vector<DpdkWorkerThread*> workerThreadVec;
-    int i = 0;
-    for (auto iter = coresToUse.begin(); iter != coresToUse.end(); iter++)
+    for (int i = 0; i < readCoreNum; ++i)
     {
         auto* newWorker = new AppWorkerThread(workerConfigArr[i]);
         workerThreadVec.push_back(newWorker);
-        i++;
     }
 
     //启动所有工作线程
@@ -274,8 +289,33 @@ int main(int argc, char* argv[]) {
     args.workerThreadsVector = &workerThreadVec;
     args.sendPacketsToPort = sendPacketsToPort;
     ApplicationEventHandler::getInstance().onApplicationInterrupted(onApplicationInterrupted, &args);
+
+    //统计信息
+    uint64_t total_data_num = 0;
+    uint64_t total_pcaket_num = 0;
+    struct timeval start{}, end{};
+
+    gettimeofday(&start, nullptr);
     //无限循环（直到程序终止）
-    while (!args.shouldStop) usleep(5);
+    while (!args.shouldStop){
+        struct rte_eth_stats ethStats{};
+        if (0 == rte_eth_stats_get(sendPacketsToPort, &ethStats)){
+            uint64_t send_data_num = ethStats.obytes - total_data_num;
+            if(send_data_num > 1024*1024*1024){
+                gettimeofday(&end, nullptr);
+                float use_time = (end.tv_sec - start.tv_sec) + (double)(end.tv_usec - start.tv_usec)/1000000.0;
+                cout << "================ sending ================  " <<(io_delay?"等待IO":"")<< endl;
+                cout << "耗费时间: " << use_time << "(s)\t";
+                cout << "发送包数: " << (ethStats.opackets - total_pcaket_num) << '\t';
+                cout << "发送数据: " << (double)(send_data_num)/1024/1024 << "(MB)\t";
+                cout << "发送速度: " << ((double)(send_data_num)/1024/1024) / use_time << "(MB/s) " << endl;
+                total_pcaket_num = ethStats.opackets;
+                total_data_num = ethStats.obytes;
+                gettimeofday(&start, nullptr);
+            }
+        }
+        usleep(100);
+    }
 
     return 0;
 }
@@ -335,9 +375,16 @@ void onApplicationInterrupted(void* cookie)
         auto* thread = (AppWorkerThread*)iter;
         PacketStats threadStats = thread->getStats();
         aggregatedStats.collectStats(threadStats);
+        printer.printRow(threadStats.getStatValuesAsString("|"), '|');
         delete thread;
     }
+    struct rte_eth_stats ethStats{};
+    if (0 == rte_eth_stats_get(args->sendPacketsToPort, &ethStats)){
+        aggregatedStats.send_pcaket_num = ethStats.opackets;
+        aggregatedStats.send_data_num = ethStats.obytes;
+    }
 
+    printer.printSeparator();
     printer.printRow(aggregatedStats.getStatValuesAsString("|"), '|');
 
     rte_eth_dev_set_link_down(args->sendPacketsToPort);
@@ -368,5 +415,13 @@ void printUsage()
            //"./DpdkSendPackets -s 0 -b /data/send_pcap.list  设置DPDK发包端口0读取目录/data/send_pcap.list文件中包地址\n"
            "./DpdkSendPackets -s 0 -a /data/pcap -p 1000    设置DPDK发包端口0读取目录/data/pcap包,发送速度为1000Mb/s\n"
            , AppName::get().c_str());
+}
+
+CoreMask GenCoreNums(uint16_t start, uint16_t end){
+    CoreMask result = 0;
+    for (uint16_t i = start; i < end; i++) {
+        result |= 1 << i;
+    }
+    return result;
 }
 

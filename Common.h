@@ -68,6 +68,10 @@ struct AppWorkerConfig
     uint16_t open_tx_queues = 1;
     uint16_t *now_open_tx_queues = nullptr;
 
+    //
+    bool showReadInfo = false;
+    bool *io_delay = nullptr;
+
 	AppWorkerConfig():
 	CoreId(MAX_NUM_OF_CORES+1),
 	SendPacketsTo(nullptr)
@@ -84,6 +88,11 @@ public:
 	uint16_t WorkerId;
 
 	//根据返回值统计
+	uint64_t read_packet_num = 0;
+	uint64_t read_data_num = 0;
+	uint64_t send_pcaket_num = 0;
+	uint64_t send_data_num = 0;
+
     uint64_t PacketCount = 0;
     uint64_t sendSuccess_ = 0; //包数
 	uint64_t sendError_ = 0;
@@ -98,6 +107,8 @@ public:
 
 	void collectStats(PacketStats& stats)
 	{
+        read_packet_num += stats.read_packet_num;
+        read_data_num += stats.read_data_num;
 		PacketCount += stats.PacketCount;
         sendSuccess_ += stats.sendSuccess_;
         sendError_ += stats.sendError_;
@@ -110,16 +121,18 @@ public:
 	[[nodiscard]] std::string getStatValuesAsString(const std::string& delimiter) const
 	{
 		std::stringstream values;
-//		if (WorkerId == MAX_NUM_OF_CORES+1)
-//			values << "Total" << delimiter;
-//		else
-//			values << (int)WorkerId << delimiter;
-		values << PacketCount << delimiter;
-        values << sendSuccess_ << delimiter;
-        values << sendError_ << delimiter;
-        values << (double)total_number_ / 1024 / 1024 / 1024 << delimiter;
-        values << (double)send_success_number_ / 1024 / 1024 / 1024 << delimiter;
-        values << ((double)send_success_number_ / (double)total_number_) * 100 << delimiter;
+		if (WorkerId == MAX_NUM_OF_CORES+1)
+			values << "Total" << delimiter;
+		else
+			values << (int)WorkerId << delimiter;
+
+		values << send_pcaket_num << delimiter;
+//        values << sendSuccess_ << delimiter;
+//        values << sendError_ << delimiter;
+
+        values << (double)read_data_num / 1024 / 1024 / 1024 << delimiter;
+        values << (double)send_data_num / 1024 / 1024 / 1024 << delimiter;
+        values << ((double)send_data_num / (double)read_data_num) * 100 << delimiter;
 
 		return values.str();
 	}
@@ -129,16 +142,20 @@ public:
 		columnNames.clear();
 		columnWidths.clear();
 
+        columnNames.emplace_back(" 核心ID ");
 		columnNames.emplace_back("  总发送数据包数  ");
-        columnNames.emplace_back(" 发送成功数据包数 ");
-        columnNames.emplace_back(" 发送失败数据包数 ");
-        columnNames.emplace_back("负载数据量(GB)");
+//        columnNames.emplace_back(" 发送成功数据包数 ");
+//        columnNames.emplace_back(" 发送失败数据包数 ");
+        columnNames.emplace_back("读取数据量(GB)");
         columnNames.emplace_back("传输数据量(GB)");
         columnNames.emplace_back(" 成功率(%) ");
 
+        columnWidths.push_back(8);
 		columnWidths.push_back(18);
-        columnWidths.push_back(18);
-        columnWidths.push_back(18);
+
+//        columnWidths.push_back(18);
+//        columnWidths.push_back(18);
+
         columnWidths.push_back(14);
         columnWidths.push_back(14);
         columnWidths.push_back(11);
