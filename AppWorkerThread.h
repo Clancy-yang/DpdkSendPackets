@@ -182,9 +182,9 @@ public:
 
 		//统计信息
         vector<string> v;
-        struct timeval read_start{}, read_end{};
-        struct stat FileInfo{};
-        usleep(m_Stats.WorkerId);
+        //struct timeval read_start{}, read_end{};
+        //struct stat FileInfo{};
+        usleep(m_Stats.WorkerId*5);
         cout << "核心:" << m_Stats.WorkerId << " 启动" << endl;
 
 		//主循环，运行直到被告知停止
@@ -207,7 +207,7 @@ public:
             }
 
             //读取文件列表
-            uint32_t file_size = v.size(); // 剩余待读文件数量
+            //uint32_t file_size = v.size(); // 剩余待读文件数量
             uint32_t current_num = 0;
 
             //根据列表读指定pcap包
@@ -215,7 +215,7 @@ public:
                 //判断当前包是否归属于当前线程处理
                 if(current_num++ % m_WorkerConfig.readCoreNum != m_Stats.WorkerId) continue;
                 //开始计时
-                gettimeofday(&read_start, nullptr);
+                //gettimeofday(&read_start, nullptr);
                 //开始读取数据
                 pcpp::PcapFileReaderDevice reader(s.c_str());
                 if(!reader.open()){
@@ -223,40 +223,31 @@ public:
                     cout << "文件 " << s << "打开失败"<<endl;
                     continue;
                 }
-                stat(s.c_str(), &FileInfo);
+                //stat(s.c_str(), &FileInfo);
 
                 //包总数
-                uint64_t total_packet_num = 0;
+                //uint64_t total_packet_num = 0;
 
-                //RawPacketVector的数组
-                vector<pcpp::RawPacketVector*> raw_packet_vector_vector;
-
+                vector<pcpp::RawPacket*> raw_packet_vector;
                 //在未收到终止信号或未break时一直循环
                 while (!m_Stop){
-                    //新建RawPacketVector对象
-                    auto *rawPacketVector = new pcpp::RawPacketVector();
-                    //根据pcpp文档表示<64时直接发送>400时将有0.2秒的内置睡眠时间来清理TX描述符
-                    uint64_t tmp = reader.getNextPackets(*rawPacketVector,400);
-                    total_packet_num += tmp;
-
-                    //当返回值小于0时读包结束
-                    if(tmp <= 0){
+                    auto *rawPacket = new pcpp::RawPacket();
+                    if(!reader.getNextPacket(*rawPacket)){
                         //读取完毕：统计读包用时
-                        gettimeofday(&read_end, nullptr);
+//                        gettimeofday(&read_end, nullptr);
                         //统计信息
                         *(m_WorkerConfig.io_delay) = (*(m_WorkerConfig.token) == m_Stats.WorkerId);
-                        m_Stats.read_packet_num += total_packet_num;
-                        m_Stats.read_data_num += FileInfo.st_size;
-                        if(m_WorkerConfig.showReadInfo){
-                            cout << "================ loading ================  "<<(*(m_WorkerConfig.token) == m_Stats.WorkerId ? "等待IO":" ") << endl;
-                            cout << "核心:" << m_Stats.WorkerId << " 读取File: " << s << "(" << current_num << "/" << file_size << ")" << endl;
-                            float read_pcap_use_time = (read_end.tv_sec - read_start.tv_sec) + (double)(read_end.tv_usec - read_start.tv_usec)/1000000.0;
-                            cout << "耗费时间: " << read_pcap_use_time << "(s)\t";
-                            cout << "读取包数: " << total_packet_num << '\t';
-                            cout << "文件大小: " << FileInfo.st_size/1024/1024 << "(MB)\t";
-                            cout << "读取速度: " << FileInfo.st_size/1024/1024 / read_pcap_use_time << "(MB/s)" << endl;
-                        }
-                        read_pcap_map_.insert(make_pair(s, 1));
+//                        m_Stats.read_packet_num += total_packet_num;
+//                        m_Stats.read_data_num += FileInfo.st_size;
+//                        if(m_WorkerConfig.showReadInfo){
+//                            cout << "================ loading ================  "<<(*(m_WorkerConfig.token) == m_Stats.WorkerId ? "等待IO":" ") << endl;
+//                            cout << "核心:" << m_Stats.WorkerId << " 读取File: " << s << "(" << current_num << "/" << file_size << ")" << endl;
+//                            float read_pcap_use_time = (read_end.tv_sec - read_start.tv_sec) + (double)(read_end.tv_usec - read_start.tv_usec)/1000000.0;
+//                            cout << "耗费时间: " << read_pcap_use_time << "(s)\t";
+//                            cout << "读取包数: " << total_packet_num << '\t';
+//                            cout << "文件大小: " << FileInfo.st_size/1024/1024 << "(MB)\t";
+//                            cout << "读取速度: " << FileInfo.st_size/1024/1024 / read_pcap_use_time << "(MB/s)" << endl;
+//                        }
 
                         //本线程读取完毕,等待其他线程交出令牌
                         while(!m_Stop && *(m_WorkerConfig.token) != m_Stats.WorkerId) {
@@ -264,37 +255,128 @@ public:
                         }
 
                         //本线程获取令牌,开始发包
-                        for(auto it:raw_packet_vector_vector){
-                            if(!m_Stop)
-                                sendPacketsTo->sendPackets(*it);
+                        int tx_queues_num = 0;
+                        for(auto it:raw_packet_vector){
+                            if(!m_Stop) {
+                                //直接发送 无视成功率
+                                //sendPacketsTo->sendPacket(*it, tx_queues_num++ % m_WorkerConfig.open_tx_queues,m_WorkerConfig.useTxBuffer);
+                                //失败重传 提高成功率
+                                if (m_WorkerConfig.useTxBuffer) {
+                                    sendPacketsTo->sendPacket(*it, tx_queues_num++ % m_WorkerConfig.open_tx_queues,true);
+                                } else {
+                                    uint16_t num = 0;
+                                    while (!sendPacketsTo->sendPacket(*it, tx_queues_num++ % m_WorkerConfig.open_tx_queues)) {
+                                        if (++num > 3) break;
+                                        usleep(1);
+                                    }
+                                }
+                            }
                             it->clear();
                             delete it;
                             it = nullptr;
                         }
-                        raw_packet_vector_vector.clear();
+                        raw_packet_vector.clear();
+
                         //发包结束,统计信息
+                        struct rte_eth_stats ethStats{};
+                        if (0 == rte_eth_stats_get(m_WorkerConfig.SendPacketsPort, &ethStats)){
+                            m_Stats.send_pcaket_num += ethStats.opackets - *(m_WorkerConfig.success_packets_num);
+                            m_Stats.send_data_num += ethStats.obytes - *(m_WorkerConfig.send_success_number);
+                            *(m_WorkerConfig.success_packets_num) = ethStats.opackets;
+                            *(m_WorkerConfig.send_success_number) = ethStats.obytes;
+                        }
 
                         //本线程发包结束,交出令牌
                         ++*(m_WorkerConfig.token) %= m_WorkerConfig.readCoreNum;
                         reader.close();
                         break;
                     }
-
-                    //将rawPacketVector放入vector
-                    raw_packet_vector_vector.push_back(rawPacketVector);
+                    raw_packet_vector.push_back(rawPacket);
+                    m_Stats.read_packet_num++;
+                    m_Stats.read_data_num += rawPacket->getRawDataLen();
                 }
 
                 //收到终止信号
                 if(m_Stop){
-                    for(auto it:raw_packet_vector_vector){
+                    for(auto it:raw_packet_vector){
                         it->clear();
                         delete it;
                         it = nullptr;
                     }
-                    raw_packet_vector_vector.clear();
+                    raw_packet_vector.clear();
                     reader.close();
                     return true;
                 }
+
+
+//                //RawPacketVector的数组
+//                vector<pcpp::RawPacketVector*> raw_packet_vector_vector;
+//
+//                //在未收到终止信号或未break时一直循环
+//                while (!m_Stop){
+//                    //新建RawPacketVector对象
+//                    auto *rawPacketVector = new pcpp::RawPacketVector();
+//                    //根据pcpp文档表示<64时直接发送>400时将有0.2秒的内置睡眠时间来清理TX描述符
+//                    uint64_t tmp = reader.getNextPackets(*rawPacketVector,64);
+//                    total_packet_num += tmp;
+//
+//                    //当返回值小于0时读包结束
+//                    if(tmp <= 0){
+//                        //读取完毕：统计读包用时
+//                        gettimeofday(&read_end, nullptr);
+//                        //统计信息
+//                        *(m_WorkerConfig.io_delay) = (*(m_WorkerConfig.token) == m_Stats.WorkerId);
+//                        m_Stats.read_packet_num += total_packet_num;
+//                        m_Stats.read_data_num += FileInfo.st_size;
+//                        if(m_WorkerConfig.showReadInfo){
+//                            cout << "================ loading ================  "<<(*(m_WorkerConfig.token) == m_Stats.WorkerId ? "等待IO":" ") << endl;
+//                            cout << "核心:" << m_Stats.WorkerId << " 读取File: " << s << "(" << current_num << "/" << file_size << ")" << endl;
+//                            float read_pcap_use_time = (read_end.tv_sec - read_start.tv_sec) + (double)(read_end.tv_usec - read_start.tv_usec)/1000000.0;
+//                            cout << "耗费时间: " << read_pcap_use_time << "(s)\t";
+//                            cout << "读取包数: " << total_packet_num << '\t';
+//                            cout << "文件大小: " << FileInfo.st_size/1024/1024 << "(MB)\t";
+//                            cout << "读取速度: " << FileInfo.st_size/1024/1024 / read_pcap_use_time << "(MB/s)" << endl;
+//                        }
+//                        read_pcap_map_.insert(make_pair(s, 1));
+//
+//                        //本线程读取完毕,等待其他线程交出令牌
+//                        while(!m_Stop && *(m_WorkerConfig.token) != m_Stats.WorkerId) {
+//                            usleep(1);
+//                        }
+//
+//                        //本线程获取令牌,开始发包
+//                        int tx_queues_num = 0;
+//                        for(auto it:raw_packet_vector_vector){
+//                            if(!m_Stop)
+//                                sendPacketsTo->sendPackets(*it,tx_queues_num++%m_WorkerConfig.open_tx_queues);
+//                            it->clear();
+//                            delete it;
+//                            it = nullptr;
+//                        }
+//                        raw_packet_vector_vector.clear();
+//                        //发包结束,统计信息
+//
+//                        //本线程发包结束,交出令牌
+//                        ++*(m_WorkerConfig.token) %= m_WorkerConfig.readCoreNum;
+//                        reader.close();
+//                        break;
+//                    }
+//
+//                    //将rawPacketVector放入vector
+//                    raw_packet_vector_vector.push_back(rawPacketVector);
+//                }
+//
+//                //收到终止信号
+//                if(m_Stop){
+//                    for(auto it:raw_packet_vector_vector){
+//                        it->clear();
+//                        delete it;
+//                        it = nullptr;
+//                    }
+//                    raw_packet_vector_vector.clear();
+//                    reader.close();
+//                    return true;
+//                }
             }
 
             if(!m_WorkerConfig.PcapFileListPath.empty()) return true; //根据list读完pcap即结束

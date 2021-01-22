@@ -109,6 +109,7 @@ public:
 	{
         read_packet_num += stats.read_packet_num;
         read_data_num += stats.read_data_num;
+
 		PacketCount += stats.PacketCount;
         sendSuccess_ += stats.sendSuccess_;
         sendError_ += stats.sendError_;
@@ -127,11 +128,12 @@ public:
 			values << (int)WorkerId << delimiter;
 
 		values << send_pcaket_num << delimiter;
+        values << read_packet_num << delimiter;
 //        values << sendSuccess_ << delimiter;
 //        values << sendError_ << delimiter;
 
-        values << (double)read_data_num / 1024 / 1024 / 1024 << delimiter;
         values << (double)send_data_num / 1024 / 1024 / 1024 << delimiter;
+        values << (double)read_data_num / 1024 / 1024 / 1024 << delimiter;
         values << ((double)send_data_num / (double)read_data_num) * 100 << delimiter;
 
 		return values.str();
@@ -144,14 +146,16 @@ public:
 
         columnNames.emplace_back(" 核心ID ");
 		columnNames.emplace_back("  总发送数据包数  ");
+        columnNames.emplace_back("  总读取数据包数  ");
 //        columnNames.emplace_back(" 发送成功数据包数 ");
 //        columnNames.emplace_back(" 发送失败数据包数 ");
+        columnNames.emplace_back("发送数据量(GB)");
         columnNames.emplace_back("读取数据量(GB)");
-        columnNames.emplace_back("传输数据量(GB)");
         columnNames.emplace_back(" 成功率(%) ");
 
         columnWidths.push_back(8);
 		columnWidths.push_back(18);
+        columnWidths.push_back(18);
 
 //        columnWidths.push_back(18);
 //        columnWidths.push_back(18);

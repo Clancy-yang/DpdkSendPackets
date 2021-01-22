@@ -17,7 +17,7 @@
 
 using namespace pcpp;
 
-#define DEFAULT_MBUF_POOL_SIZE 4095
+#define DEFAULT_MBUF_POOL_SIZE 65535
 
 static struct option FilterTrafficOptions[] =
         {
@@ -178,6 +178,7 @@ int main(int argc, char* argv[]) {
     DpdkDevice* sendPacketsTo = DpdkDeviceList::getInstance().getDeviceByPort(sendPacketsToPort);
     if (sendPacketsTo != nullptr && !sendPacketsTo->isOpened() &&  !sendPacketsTo->open())
         EXIT_WITH_ERROR("Could not open port#%d for sending matched packets", sendPacketsToPort);
+    sendPacketsTo->close();
     uint16_t totalNumOfTxQueues = sendPacketsTo->getTotalNumOfTxQueues();
     cout << "获取DPDK Total TX Queues Number:" << totalNumOfTxQueues << endl;
     if(totalNumOfTxQueues > readCoreNum && sendPacketsTo->openMultiQueues(1,readCoreNum)){
@@ -185,6 +186,8 @@ int main(int argc, char* argv[]) {
     }else{
         cout << "获取 TX Queues Number:" << sendPacketsTo->getNumOfOpenedTxQueues() << endl;
     }
+
+
     uint16_t open_tx_queues = sendPacketsTo->getNumOfOpenedTxQueues();
     uint16_t now_open_tx_queues = 0;
 
@@ -308,7 +311,7 @@ int main(int argc, char* argv[]) {
                 cout << "耗费时间: " << use_time << "(s)\t";
                 cout << "发送包数: " << (ethStats.opackets - total_pcaket_num) << '\t';
                 cout << "发送数据: " << (double)(send_data_num)/1024/1024 << "(MB)\t";
-                cout << "发送速度: " << ((double)(send_data_num)/1024/1024) / use_time << "(MB/s) " << endl;
+                cout << "发送速度: " << ((double)(send_data_num)/1024/128) / use_time << "(Mb/s) " << endl;
                 total_pcaket_num = ethStats.opackets;
                 total_data_num = ethStats.obytes;
                 gettimeofday(&start, nullptr);
@@ -398,22 +401,22 @@ void printUsage()
 {
     printf("\n帮助:\n"
            "------\n"
-           "%s [-hl][-s PORT] [-a /root/pcap] [-b /data/send_pcap.list]\n"
+           "%s [-hl][-s DPDK发包端口] [-a 读包路径] [-b 是否开启TXBUFFER] [-c 工作线程数] [-p 限速]\n"
            "\n命令:\n\n"
            "    -h                           : 使用说明\n"
-           "    -l                           : DPDK端口列表\n"
-           "    -s                           : 绑定dpdk发包端口\n"
-           "    -a                           : pcap包所在目录\n"
-           "    -p                           : 发送速度(Mb/s)\n"
-           "    -b                           : 发包使用TxBuffer(提速但可能丢包)\n"
-           //"    -b                           : pcap包的list文件\n"
+           "    -l                           : DPDK可用端口列表\n"
+           "    -s                           : DPDK端口ID\n"
+           "    -a                           : PCAP包存放路径\n"
+           "    -b                           : 是否使用TxBuffer[可能提速但丢包]\n"
+           "    -c                           : 工作线程数[默认1]\n"
+           "    -p                           : 发送速度(Mbps)[不设置则不限速]\n"
            "------\n"
            "\n流程:\n\n"
            "./DpdkSendPackets -h  查看使用说明\n"
            "./DpdkSendPackets -l  查看DPDK支持端口列表\n"
            "./DpdkSendPackets -s 0 -a /data/pcap            设置DPDK发包端口0读取目录/data/pcap包\n"
-           //"./DpdkSendPackets -s 0 -b /data/send_pcap.list  设置DPDK发包端口0读取目录/data/send_pcap.list文件中包地址\n"
-           "./DpdkSendPackets -s 0 -a /data/pcap -p 1000    设置DPDK发包端口0读取目录/data/pcap包,发送速度为1000Mb/s\n"
+           "./DpdkSendPackets -s 0 -a /data/pcap -c 4       设置DPDK发包端口0读取目录/data/pcap包,开启4个工作线程\n"
+           "./DpdkSendPackets -s 0 -a /data/pcap -p 1000    设置DPDK发包端口0读取目录/data/pcap包,发送速度限制为1000Mb/s\n"
            , AppName::get().c_str());
 }
 
