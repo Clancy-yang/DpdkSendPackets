@@ -46,15 +46,27 @@ struct AppWorkerConfig
 	pcpp::DpdkDevice* SendPacketsTo;
     uint16_t SendPacketsPort = 0;
     //发送速度(Mbps)
-    uint16_t send_speed = 10000;
+    uint16_t send_speed = 0;
     //设备是否支持限速
-    bool dev_speed_limit = true;
+    bool dev_speed_limit = false;
 	//读文件目录
 	string PcapFileDirPath;
 	//读文件列表
     string PcapFileListPath;
     //发包是否启动buffer,启用后提速但可能会丢包
     bool useTxBuffer = false;
+    //令牌
+    uint16_t *token = nullptr;
+    //读核心数
+    uint16_t readCoreNum = 1;
+    //传输包总数
+    uint64_t *success_packets_num = nullptr;
+    //传输包数据量
+    uint64_t *send_success_number = nullptr;
+
+    //
+    uint16_t open_tx_queues = 1;
+    uint16_t *now_open_tx_queues = nullptr;
 
 	AppWorkerConfig():
 	CoreId(MAX_NUM_OF_CORES+1),
@@ -69,13 +81,16 @@ struct AppWorkerConfig
 struct PacketStats
 {
 public:
-	uint8_t WorkerId;
+	uint16_t WorkerId;
 
+	//根据返回值统计
     uint64_t PacketCount = 0;
-    uint64_t sendSuccess_ = 0;//包数
+    uint64_t sendSuccess_ = 0; //包数
 	uint64_t sendError_ = 0;
-	uint64_t send_success_number_ = 0;//数据量
 	uint64_t total_number_ = 0; //负载总数据量
+
+    //根据网卡信息统计
+    uint64_t send_success_number_ = 0;//数据量
 
 	PacketStats() : WorkerId(MAX_NUM_OF_CORES+1), PacketCount(0){}
 

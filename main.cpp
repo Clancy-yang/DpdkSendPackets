@@ -23,7 +23,9 @@ static struct option FilterTrafficOptions[] =
         {
                 {"s",  required_argument, 0, 's'},
                 {"pcap-dir-path",  required_argument, 0, 'a'},
+                {"pcap-dir-path2",  required_argument, 0, 'd'},
                 {"useTxBuffer",  no_argument, 0, 'b'},
+                {"read-core-num",  required_argument, 0, 'c'},
                 {"speed",  required_argument, 0, 'p'},
                 {"list", optional_argument, 0, 'l'},
                 {"help", optional_argument, 0, 'h'},
@@ -62,15 +64,18 @@ int main(int argc, char* argv[]) {
     int sendPacketsToPort = -1;
 
     bool useTxBuffer = false;
+    uint16_t readCoreNum = 1;
 
     int optionIndex = 0;
     char opt = 0;
-    string pcapDirPath,pcapListPath;
+    string pcapListPath;
+    string pcapDirPath[2];
 
     //发送速度(Mbps)
-    uint16_t send_speed = 34463;
+    uint16_t send_speed = 0;
+    bool dev_speed_limit = false;
 
-    while((opt = getopt_long (argc, argv, "s:a:p:blh", FilterTrafficOptions, &optionIndex)) != -1)
+    while((opt = getopt_long (argc, argv, "s:a:d:c:p:blh", FilterTrafficOptions, &optionIndex)) != -1)
     {
         switch (opt)
         {
@@ -85,7 +90,12 @@ int main(int argc, char* argv[]) {
             }
             case 'a':
             {
-                pcapDirPath = string(optarg);
+                pcapDirPath[0] = string(optarg);
+                break;
+            }
+            case 'd':
+            {
+                pcapDirPath[1] = string(optarg);
                 break;
             }
             case 'b':
@@ -93,8 +103,14 @@ int main(int argc, char* argv[]) {
                 useTxBuffer = true;
                 break;
             }
+            case 'c':
+            {
+                readCoreNum = atoi(optarg);
+                break;
+            }
             case 'p':
             {
+                dev_speed_limit = true;
                 send_speed = atoi(optarg);
                 break;
             }
@@ -116,7 +132,7 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    if(pcapDirPath.empty() && pcapListPath.empty()){
+    if(pcapDirPath[0].empty() && pcapListPath.empty()){
         printUsage();
         exit(0);
     }
@@ -148,45 +164,72 @@ int main(int argc, char* argv[]) {
     DpdkDevice* sendPacketsTo = DpdkDeviceList::getInstance().getDeviceByPort(sendPacketsToPort);
     if (sendPacketsTo != nullptr && !sendPacketsTo->isOpened() &&  !sendPacketsTo->open())
         EXIT_WITH_ERROR("Could not open port#%d for sending matched packets", sendPacketsToPort);
+    uint16_t totalNumOfTxQueues = sendPacketsTo->getTotalNumOfTxQueues();
+    cout << "获取DPDK Total TX Queues Number:" << totalNumOfTxQueues << endl;
+    if(totalNumOfTxQueues > readCoreNum && sendPacketsTo->openMultiQueues(1,readCoreNum)){
+        cout << "设置 TX Queues Number:" << sendPacketsTo->getNumOfOpenedTxQueues() << endl;
+    }else{
+        cout << "获取 TX Queues Number:" << sendPacketsTo->getNumOfOpenedTxQueues() << endl;
+    }
+    uint16_t open_tx_queues = sendPacketsTo->getNumOfOpenedTxQueues();
+    uint16_t now_open_tx_queues = 0;
 
+    uint16_t token = 0;
+    uint64_t success_packets_num = 0;
+    uint64_t send_success_number = 0;
     //工作线程配置结构体数组 每个核心绑定一个工作线程配置结构体
     AppWorkerConfig workerConfigArr[coresToUse.size()];
-    workerConfigArr[0].CoreId = coresToUse[0].Id;
-    workerConfigArr[0].SendPacketsTo = sendPacketsTo;
-    workerConfigArr[0].SendPacketsPort = sendPacketsToPort;
-    workerConfigArr[0].PcapFileDirPath = pcapDirPath;
-    workerConfigArr[0].PcapFileListPath = pcapListPath;
-    workerConfigArr[0].send_speed = send_speed;
-    workerConfigArr[0].useTxBuffer = useTxBuffer;
-
-    rte_eth_dev_info dev_info{};
-    rte_eth_dev_info_get(sendPacketsToPort,&dev_info);
-    cout << "speed_capa:" << dev_info.speed_capa << endl;
-    cout << "nb_tx_queues:" << dev_info.nb_tx_queues<< endl;
-    cout << "nb_rx_queues:" << dev_info.nb_rx_queues<< endl;
-
-    if(rte_eth_dev_start(sendPacketsToPort) == 0){
-        cout << "rte_eth_dev_start success!" << endl;
-    }else{
-        cout << "rte_eth_dev_start error!" << endl;
+    if(readCoreNum > coresToUse.size()){
+        cout << "读包核心超出可用核心" << endl;
+        exit(0);
     }
 
-    if(rte_eth_dev_set_link_up(sendPacketsToPort) == 0){
-        cout << "rte_eth_dev_set_link_up success!" << endl;
-    }else{
-        cout << "rte_eth_dev_set_link_up error!" << endl;
+    for(int i = 0; i < readCoreNum; ++i){
+        workerConfigArr[i].CoreId = i;
+        workerConfigArr[i].SendPacketsTo = sendPacketsTo;
+        workerConfigArr[i].SendPacketsPort = sendPacketsToPort;
+        workerConfigArr[i].PcapFileDirPath = pcapDirPath[0];
+        workerConfigArr[i].PcapFileListPath = pcapListPath;
+        workerConfigArr[i].send_speed = send_speed;
+        workerConfigArr[i].dev_speed_limit = dev_speed_limit;
+        workerConfigArr[i].useTxBuffer = useTxBuffer;
+        workerConfigArr[i].token = &token;
+        workerConfigArr[i].readCoreNum = readCoreNum;
+        workerConfigArr[i].success_packets_num = &success_packets_num;
+        workerConfigArr[i].send_success_number = &send_success_number;
+        workerConfigArr[i].open_tx_queues = open_tx_queues;
+        workerConfigArr[i].now_open_tx_queues = &now_open_tx_queues;
     }
 
-    struct rte_eth_dev *dev;
-    dev = &rte_eth_devices[sendPacketsToPort];
-    if(dev->data->dev_link.link_speed == 0){
-        dev->data->dev_link.link_speed = 10240;
-        cout << "set link_speed = "<< dev->data->dev_link.link_speed << endl;
-    }else{
-        cout << "get link_speed = "<< dev->data->dev_link.link_speed << endl;
-    }
+    //是否开启限速模式
+    if(dev_speed_limit){
+        rte_eth_dev_info dev_info{};
+        rte_eth_dev_info_get(sendPacketsToPort,&dev_info);
+        cout << "speed_capa:" << dev_info.speed_capa << endl;
+        cout << "nb_tx_queues:" << dev_info.nb_tx_queues<< endl;
+        cout << "nb_rx_queues:" << dev_info.nb_rx_queues<< endl;
 
-    if(send_speed != 34463) {
+        if(rte_eth_dev_start(sendPacketsToPort) == 0){
+            cout << "rte_eth_dev_start success!" << endl;
+        }else{
+            cout << "rte_eth_dev_start error!" << endl;
+        }
+
+        if(rte_eth_dev_set_link_up(sendPacketsToPort) == 0){
+            cout << "rte_eth_dev_set_link_up success!" << endl;
+        }else{
+            cout << "rte_eth_dev_set_link_up error!" << endl;
+        }
+
+        struct rte_eth_dev *dev;
+        dev = &rte_eth_devices[sendPacketsToPort];
+        if(dev->data->dev_link.link_speed == 0){
+            dev->data->dev_link.link_speed = 10240;
+            cout << "set link_speed = "<< dev->data->dev_link.link_speed << endl;
+        }else{
+            cout << "get link_speed = "<< dev->data->dev_link.link_speed << endl;
+        }
+
         int limit_stat = rte_eth_set_queue_rate_limit(sendPacketsToPort, 0, send_speed);
         if (limit_stat != 0) {
             switch (limit_stat) {
@@ -207,7 +250,6 @@ int main(int argc, char* argv[]) {
                     break;
             }
             cout << "采用 usleep 模式,请手动调节限速大小" << endl;
-            workerConfigArr[0].dev_speed_limit = false;
         }else{
             cout << "DPDK限速中:当前速度:" << send_speed << "Mbps" << endl;
         }
@@ -275,9 +317,11 @@ void onApplicationInterrupted(void* cookie)
 {
     auto* args = (FiltetTrafficArgs*)cookie;
     //停止工作线程
-    printf("\n\nApplication stopped\n");
+    printf("\n\nApplication stop . . .\n");
 
-    //DpdkDeviceList::getInstance().stopDpdkWorkerThreads();
+    DpdkDeviceList::getInstance().stopDpdkWorkerThreads();
+
+    printf("\n\nApplication stop ok\n");
 
     //创建表格打印
     std::vector<std::string> columnNames;
